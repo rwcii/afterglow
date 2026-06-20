@@ -1,0 +1,43 @@
+// entropy.c — esp_random-backed RNG + boot-constant drift
+#include "entropy.h"
+#include <math.h>
+#include "esp_log.h"
+#include "esp_random.h"
+
+static const char *TAG = "entropy";
+
+esp_err_t ag_entropy_init(void)
+{
+    // esp_random is HW-backed once RF (Wi-Fi/BT) is up; before that it falls
+    // back to a bootloader seed. We initialize after radio start.
+    ESP_LOGI(TAG, "entropy init");
+    return ESP_OK;
+}
+
+uint32_t ag_rand_u32(void)
+{
+    return esp_random();
+}
+
+float ag_rand_uniform(float lo, float hi)
+{
+    return lo + (hi - lo) * ((float)esp_random() / (float)UINT32_MAX);
+}
+
+float ag_rand_gauss(float mu, float sigma)
+{
+    // Box-Muller; u1 kept off zero to avoid log(0).
+    float u1 = ag_rand_uniform(1e-7f, 1.0f);
+    float u2 = ag_rand_uniform(0.0f, 1.0f);
+    float z = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+    return mu + sigma * z;
+}
+
+void ag_entropy_drift_tick(afterglow_config_t *cfg)
+{
+    (void)cfg;
+    // TODO(P3): hours-scale random walk of w_*, *_pcenter_*, dropout_base_rate
+    // tau_sel_s within their ranges (re-clamp after each step) so the
+    // node's parameters do not stay fixed for long periods.
+    ESP_LOGD(TAG, "drift tick TODO");
+}

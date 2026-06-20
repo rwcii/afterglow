@@ -1,0 +1,11 @@
+_tmp/
+
+# ESP-IDF build artifacts
+/build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+*.pyc
+.ccls-cache/
+

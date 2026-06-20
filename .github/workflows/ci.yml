@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  # Fast, runs on every push: the privacy-critical math, host-native.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - name: Configure
+        run: cmake -S test/host -B build/host -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build/host -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build/host --output-on-failure
+
+  # Builds the firmware for the real target with the pinned IDF.
+  idf-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build firmware (esp32s3)
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+
+  # On-target Unity suite under QEMU. esp32s3 QEMU support varies by IDF/QEMU
+  # build, so this job is allowed to fail without blocking the merge until the
+  # QEMU target is confirmed green; flip continue-on-error off once validated.
+  target-tests:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.3
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test harness
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          pip install pytest-embedded pytest-embedded-idf pytest-embedded-qemu
+      - name: Build target test app
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C test/target set-target esp32s3 build
+      - name: Run under QEMU
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          pytest test/target --embedded-services idf,qemu --build-dir build
