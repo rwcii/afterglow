@@ -16,6 +16,9 @@
 extern "C" {
 #endif
 
+// Load config (min_sightings, eligibility policy). Call once at boot.
+esp_err_t classifier_init(void);
+
 // Update classification state for a record on a new sighting; may promote
 // cls and set AG_FLAG_REPLAY_ELIGIBLE once stable.
 void classifier_observe(ag_beacon_record_t *rec);

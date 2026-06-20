@@ -35,9 +35,22 @@ float ag_rand_gauss(float mu, float sigma)
 
 void ag_entropy_drift_tick(afterglow_config_t *cfg)
 {
-    (void)cfg;
-    // TODO(P3): hours-scale random walk of w_*, *_pcenter_*, dropout_base_rate
-    // tau_sel_s within their ranges (re-clamp after each step) so the
-    // node's parameters do not stay fixed for long periods.
-    ESP_LOGD(TAG, "drift tick TODO");
+    if (!cfg) return;
+    // Hours-scale random walk: each call nudges a few boot constants by a small
+    // Gaussian step, then re-clamps the whole struct to its documented ranges.
+    // The caller schedules this rarely (minutes-to-hours), so the constants
+    // wander slowly rather than staying fixed for the node's whole uptime.
+    const float STEP = 0.01f; // small per-tick nudge in weight units
+    cfg->w_rec  += ag_rand_gauss(0.0f, STEP);
+    cfg->w_rssi += ag_rand_gauss(0.0f, STEP);
+    cfg->w_rnd  += ag_rand_gauss(0.0f, STEP);
+    cfg->w_cls  += ag_rand_gauss(0.0f, STEP);
+    cfg->w_div  += ag_rand_gauss(0.0f, STEP);
+    cfg->tau_sel_s        += ag_rand_gauss(0.0f, 1.0f);
+    cfg->dropout_base_rate += ag_rand_gauss(0.0f, 0.0005f);
+    cfg->ble_pcenter_lo   += ag_rand_gauss(0.0f, 0.2f);
+    cfg->ble_pcenter_hi   += ag_rand_gauss(0.0f, 0.2f);
+
+    afterglow_config_clamp(cfg);
+    ESP_LOGD(TAG, "drift tick applied");
 }

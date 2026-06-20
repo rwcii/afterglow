@@ -48,33 +48,48 @@ void app_main(void)
              radio->name, radio->concurrent_capture_replay);
     ESP_ERROR_CHECK(radio->init());
 
-    // P3 storage slab in PSRAM.
-    ESP_ERROR_CHECK(pool_init(&s_cfg));
-    ESP_ERROR_CHECK(classifier_init(&s_cfg));
+    // Storage slab in PSRAM + classifier state.
+    ESP_ERROR_CHECK(pool_init());
+    ESP_ERROR_CHECK(classifier_init());
 
     // P1: start capturing. capture glues radio_backend -> pool/classifier.
-    ESP_ERROR_CHECK(capture_start(&s_cfg));
+    ESP_ERROR_CHECK(capture_start());
 
-    // P2/P3: replay + tx-power entropy.
-    ESP_ERROR_CHECK(txentropy_init(&s_cfg));
-    ESP_ERROR_CHECK(replay_init(&s_cfg));
+    // P2/P3: replay + tx-power entropy + lifecycle.
+    ESP_ERROR_CHECK(txentropy_init());
+    ESP_ERROR_CHECK(replay_init());
+    ESP_ERROR_CHECK(lifecycle_init());
 
     // P4: mesh (disabled by default until validated).
-    if (s_cfg.mesh.enabled) {
-        ESP_ERROR_CHECK(mesh_init(&s_cfg));
+    if (s_cfg.mesh_enabled) {
+        ESP_ERROR_CHECK(mesh_init());
     }
 
-    // Cooperative loop. On the single-radio backend, each tick yields radio
-    // segments per the scheduler's airtime budget; the heavy lifting
-    // lives in the modules' own tasks/timers. This loop drives the slow
-    // periodic work: eviction sweeps, lifecycle, entropy drift.
+    // Replay cadence: drive one round-robin slot every rotate_ms. The single
+    // radio time-shares scan and replay, so this is best-effort.
+    const TickType_t replay_period = pdMS_TO_TICKS(s_cfg.rotate_ms ? s_cfg.rotate_ms : 750);
+    TickType_t last_slow = xTaskGetTickCount();
+    const TickType_t slow_period = pdMS_TO_TICKS(s_cfg.dropout_sweep_ms ? s_cfg.dropout_sweep_ms : 30000);
+    uint32_t drift_counter = 0;
+
     while (true) {
-        pool_evict_sweep();
-        lifecycle_tick();
-        ag_entropy_drift_tick();   // slow boot-constant drift
-        if (s_cfg.mesh.enabled) {
-            mesh_tick();
+        // Fast: emit one ghost per rotate_ms slot.
+        replay_tick();
+
+        // Slow periodic work (eviction sweep cadence): eviction, lifecycle,
+        // ambient variance, and occasional boot-constant drift.
+        if (xTaskGetTickCount() - last_slow >= slow_period) {
+            pool_evict_sweep();
+            lifecycle_tick();
+            txentropy_update_ambient();
+            if (++drift_counter % 120 == 0) {   // hours-scale at 30 s sweeps
+                ag_entropy_drift_tick(&s_cfg);
+            }
+            last_slow = xTaskGetTickCount();
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_cfg.mesh_enabled) mesh_tick();
+
+        vTaskDelay(replay_period);
     }
 }

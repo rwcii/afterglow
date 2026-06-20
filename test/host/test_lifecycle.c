@@ -1,0 +1,129 @@
+// test_lifecycle.c — portable rotation/departure decisions.
+#include "lifecycle_logic.h"
+#include "test_util.h"
+#include <string.h>
+
+// a record with a 1000 ms cadence (interval_q = 1600 TU * 0.625 = 1000 ms).
+static ag_beacon_record_t mk_rec(void)
+{
+    ag_beacon_record_t r;
+    memset(&r, 0, sizeof(r));
+    r.cls = AG_CLASS_STATIC_RANDOM_BLE;
+    r.interval_q = 1600;          // -> 1000 ms
+    r.rssi_ewma = -70;
+    r.rssi_last = -70;
+    r.first_seen_ms = 0;
+    r.last_seen_ms = 0;
+    r.obs_count = 4;
+    r.p_virt = 4.0f;
+    r.p_center = 0.0f;
+    uint8_t addr[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+    memcpy(r.orig_addr, addr, 6);
+    uint8_t pl[5] = {0x02, 0x01, 0x06, 0xAB, 0xCD};
+    memcpy(r.payload, pl, 5);
+    r.payload_len = 5;
+    return r;
+}
+
+int main(void)
+{
+    TEST_BEGIN("lifecycle");
+    ag_prng_t rng; ag_prng_seed(&rng, 0xA17E1Fu);
+
+    // --- interval conversion (0.625 ms TU) -------------------------------
+    CHECK(ag_life_interval_ms(1600) == 1000);
+    CHECK(ag_life_interval_ms(0) == 0);
+
+    const uint32_t WINDOW = 600000u; // 10 min own-device window
+    const uint8_t GAP_MULT = 5;      // gap = 5 * 1000 ms = 5000 ms
+
+    // --- own-device detection --------------------------------------------
+    // (a) strong + continuous over the window + recent -> true.
+    ag_beacon_record_t own = mk_rec();
+    own.rssi_ewma = -30;
+    own.first_seen_ms = 1000;
+    own.last_seen_ms = 1000 + WINDOW;     // spanned the whole window
+    CHECK_MSG(ag_life_is_own_device(&own, 1000 + WINDOW, WINDOW),
+              "strong continuous co-located gear not detected");
+
+    // (b) weak signal -> false even when continuously present.
+    ag_beacon_record_t weak = own;
+    weak.rssi_ewma = -60;
+    CHECK(!ag_life_is_own_device(&weak, 1000 + WINDOW, WINDOW));
+
+    // (c) strong but short presence span -> false.
+    ag_beacon_record_t brief = mk_rec();
+    brief.rssi_ewma = -20;
+    brief.first_seen_ms = 0;
+    brief.last_seen_ms = WINDOW / 2;      // half the window
+    CHECK(!ag_life_is_own_device(&brief, WINDOW / 2, WINDOW));
+
+    // (d) strong + long span but gone stale (not recent) -> false.
+    ag_beacon_record_t stale = own;
+    CHECK(!ag_life_is_own_device(&stale, 1000 + WINDOW + WINDOW + 1, WINDOW));
+
+    // --- departure detection ---------------------------------------------
+    ag_beacon_record_t r = mk_rec();
+    r.last_seen_ms = 10000;
+    // within the 5000 ms gap -> present.
+    CHECK(!ag_life_departed(&r, 10000 + 4000, GAP_MULT));
+    // just past the gap -> departed.
+    CHECK(ag_life_departed(&r, 10000 + 5001, GAP_MULT));
+
+    // --- tick transitions: NONE -> DEPARTING -> (grace) -> EXPIRE ----------
+    ag_beacon_record_t t = mk_rec();
+    t.last_seen_ms = 10000;
+    float p_before = t.p_virt;
+
+    // present: no change.
+    CHECK(ag_life_tick_record(&t, 10000 + 1000, GAP_MULT, &rng) == AG_LIFE_NONE);
+    CHECK(!(t.flags & AG_FLAG_DEPARTING));
+    CHECK(t.p_virt == p_before);
+
+    // crossed the gap: flagged + faded toward center.
+    ag_life_action_t a = ag_life_tick_record(&t, 10000 + 6000, GAP_MULT, &rng);
+    CHECK_MSG(a == AG_LIFE_DEPARTING, "expected DEPARTING, got %d", (int)a);
+    CHECK(t.flags & AG_FLAG_DEPARTING);
+    CHECK_MSG(t.p_virt < p_before, "p_virt did not fade: %g", (double)t.p_virt);
+
+    // still inside the post-departure grace window (gap+1s < gap+2min): NONE.
+    CHECK(ag_life_tick_record(&t, 10000 + 5000 + 1000, GAP_MULT, &rng)
+          == AG_LIFE_NONE);
+
+    // well past gap + max grace (12 min = 720000 ms): EXPIRE.
+    uint32_t far = 10000 + 5000 + 720000u + 1000;
+    CHECK_MSG(ag_life_tick_record(&t, far, GAP_MULT, &rng) == AG_LIFE_EXPIRE,
+              "expected EXPIRE past grace window");
+
+    // --- rotation successor ----------------------------------------------
+    ag_beacon_record_t parent = mk_rec();
+    parent.rssi_ewma = -52;
+    parent.p_virt = -3.5f;
+    parent.p_center = -2.0f;
+    ag_beacon_record_t child;
+    ag_life_make_successor(&parent, &child, 0x12345678u, 99000u);
+
+    // continuous RSSI: walk state + observed levels carry over.
+    CHECK(child.p_virt == parent.p_virt);
+    CHECK(child.p_center == parent.p_center);
+    CHECK(child.rssi_ewma == parent.rssi_ewma);
+
+    // payload copied verbatim.
+    CHECK(child.payload_len == parent.payload_len);
+    CHECK(memcmp(child.payload, parent.payload, parent.payload_len) == 0);
+
+    // address differs (new identity), presence reset, not departing, id cleared.
+    CHECK_MSG(memcmp(child.orig_addr, parent.orig_addr, 6) != 0,
+              "successor reused the parent address");
+    CHECK(child.first_seen_ms == 99000u && child.last_seen_ms == 99000u);
+    CHECK(child.obs_count == 1);
+    CHECK(!(child.flags & AG_FLAG_DEPARTING));
+    CHECK(child.rec_id == 0);
+
+    // distinct seeds yield distinct addresses (deterministic from seed).
+    ag_beacon_record_t c2;
+    ag_life_make_successor(&parent, &c2, 0x12345679u, 99000u);
+    CHECK(memcmp(c2.orig_addr, child.orig_addr, 6) != 0);
+
+    TEST_SUMMARY();
+}

@@ -3,5 +3,5 @@
 idf_component_register(
     SRCS "radio_single.c"
     INCLUDE_DIRS "include"
-    REQUIRES radio_backend esp_wifi bt esp_timer
+    REQUIRES radio_backend esp_wifi bt esp_timer esp_hw_support
 )

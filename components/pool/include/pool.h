@@ -45,13 +45,14 @@ typedef struct {
     uint16_t interval_q;        // estimated cadence (0.625 ms / TU units)
     int8_t   rssi_last, rssi_ewma;
     uint8_t  channel, obs_count, hop_ttl;
+    uint8_t  adv_kind;          // ag_adv_kind_t — observed PDU behavior (broadcast/scannable/connectable)
     uint16_t wifi_seq;          // per-ghost synthetic 802.11 seq state
     uint32_t first_seen_ms, last_seen_ms;
     float    base_ttl_s, ttl_cap_s;
     uint32_t replay_deadline_ms;
     float    p_virt, p_center;  // RSSI walk state
     uint8_t  payload_len;
-    uint8_t  payload[31];       // BLE <=31 B; Wi-Fi templates use a separate tier (TODO P2)
+    uint8_t  payload[31];       // BLE <=31 B; Wi-Fi beacon templates are truncated to fit (Wi-Fi replay ships off)
 } ag_beacon_record_t;
 
 // Allocate the PSRAM slab sized to cfg->store_cap. Call once at boot.
@@ -64,12 +65,28 @@ esp_err_t pool_admit(const ag_capture_t *cap);
 // Run one eviction sweep (capacity + TTL + Weibull dropout).
 void pool_evict_sweep(void);
 
+// Index of the record touched by the most recent successful pool_admit (-1 if
+// none / slab was full). Valid until the next admit or sweep.
+int pool_last_admitted(void);
+
+// This node's 32-bit per-boot NodeID (origin pinning / mesh self-id).
+uint32_t pool_node_id(void);
+
+// Insert a fully-prepared record (e.g. a rotation successor built by lifecycle,
+// or a record absorbed over the mesh). Recomputes rec_id from the record's
+// identity+payload. Returns the slot index, or -1 if the slab is full.
+int pool_insert_record(const ag_beacon_record_t *rec);
+
 // Current number of live records.
 uint16_t pool_count(void);
 
 // Borrow a record by index for replay/lifecycle/mesh iteration (NULL if empty
 // slot). Caller must not retain past the next sweep.
 const ag_beacon_record_t *pool_record_at(uint16_t idx);
+
+// Mutable borrow (classifier/lifecycle update record state in place). NULL if
+// out of range. Caller must not retain past the next sweep.
+ag_beacon_record_t *pool_record_mut(uint16_t idx);
 uint16_t pool_capacity(void);
 
 #ifdef __cplusplus

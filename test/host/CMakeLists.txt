@@ -34,12 +34,41 @@ add_library(separability STATIC separability/detector.c)
 target_include_directories(separability PUBLIC separability)
 target_link_libraries(separability PUBLIC afterglow_core m)
 
+# Portable component logic compiled host-side against thin ESP-IDF shims (see
+# shim/). Only the pure-logic parts of the firmware components are listed here;
+# hardware-touching code (radio, NVS I/O) is exercised on-target, not here.
+set(COMP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../components)
+add_library(components_host STATIC
+    ${COMP_DIR}/config/config.c
+    ${COMP_DIR}/pool/pool_logic.c
+    ${COMP_DIR}/classifier/classifier_logic.c
+    ${COMP_DIR}/lifecycle/lifecycle_logic.c
+    ${COMP_DIR}/mesh/mesh_logic.c
+)
+target_include_directories(components_host PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/shim
+    ${COMP_DIR}/config/include
+    ${COMP_DIR}/pool/include
+    ${COMP_DIR}/classifier/include
+    ${COMP_DIR}/lifecycle/include
+    ${COMP_DIR}/mesh/include
+    ${COMP_DIR}/radio_backend/include
+)
+target_link_libraries(components_host PUBLIC afterglow_core m)
+
 enable_testing()
 
 # --- unit tests -----------------------------------------------------------
 foreach(t test_eviction test_txwalk test_subset test_meshguard)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE afterglow_core)
+    add_test(NAME ${t} COMMAND ${t})
+endforeach()
+
+# --- component-logic tests (host shims) -----------------------------------
+foreach(t test_config test_pool test_classifier test_lifecycle test_mesh)
+    add_executable(${t} ${t}.c)
+    target_link_libraries(${t} PRIVATE components_host afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 

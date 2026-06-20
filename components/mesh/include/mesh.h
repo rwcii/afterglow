@@ -11,6 +11,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "pool.h"   // ag_beacon_record_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,12 @@ esp_err_t mesh_init(void);
 // and run fragmented DATA transfer/reassembly with dedup/TTL/origin guards.
 // No-op while mesh_enabled=false.
 void mesh_tick(void);
+
+// Absorb a fully-reassembled inbound record from a peer. Gated by the
+// loop/amplification guards (hop-TTL decrement, own-origin refusal, LRU-seen
+// dedup); absorbed into the pool only on accept. Called by the BLE transport.
+void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
+                         uint32_t origin_node);
 
 #ifdef __cplusplus
 }

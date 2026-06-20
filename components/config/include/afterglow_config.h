@@ -86,6 +86,10 @@ typedef struct {
 // Populate cfg with the conservative defaults.
 void afterglow_config_defaults(afterglow_config_t *cfg);
 
+// Clamp every field to its documented range in place. Pure (no NVS/hardware),
+// so it is exercised host-side. Applied after every NVS load.
+void afterglow_config_clamp(afterglow_config_t *cfg);
+
 // Load from NVS into cfg, falling back to defaults for missing keys, then
 // clamp every field to its documented range. Returns ESP_OK on success.
 esp_err_t afterglow_config_load(afterglow_config_t *cfg);
