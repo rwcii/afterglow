@@ -45,6 +45,8 @@ typedef struct {
     bool     own_device_exclude;    // true
     uint32_t own_device_window_ms;  // 600000
     uint8_t  depart_gap_mult;       // 5 (3-8)
+    bool     rotation_enabled;      // true — ROTATING (NRPA) ghosts rotate address
+                                    // on a per-ghost ~15 min timer (§A6.3)
 
     // Group D — Replay (D)
     uint8_t  ble_adv_sets;          // 1 (legacy single instance)

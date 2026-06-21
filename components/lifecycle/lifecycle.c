@@ -6,6 +6,7 @@
 #include "lifecycle.h"
 #include "lifecycle_logic.h"
 #include "pool.h"
+#include "pool_logic.h"         // ag_pool_rec_id (successor id recompute)
 #include "afterglow_config.h"
 #include "entropy.h"
 #include "ag_core/ag_prng.h"
@@ -52,5 +53,36 @@ void lifecycle_tick(void)
         // (age from first_seen), so departure no longer clears eligibility or
         // retires the record here.
         ag_life_tick_record(r, t, s_cfg.depart_gap_mult, &s_rng);
+
+        // Address rotation (§A6.3) — independent of presence and TTL. A ROTATING
+        // (NRPA-class) ghost swaps to a fresh NRPA address on its per-ghost timer
+        // and keeps doing so until the lineage's TTL completes (the successor
+        // inherits first_seen/base_ttl, so eviction still kills the lineage). The
+        // rotation is decoupled from the departure/grace event entirely.
+        if (s_cfg.rotation_enabled &&
+            ag_life_rotation_mode(r->cls) == AG_LIFE_ROTATING) {
+            if (r->next_rotate_ms == 0u) {
+                // Arm the first rotation when the ghost becomes rotation-managed.
+                r->next_rotate_ms = t + ag_life_draw_rotate_ms(&s_rng);
+            } else if (ag_life_rotation_due(r, t)) {
+                ag_beacon_record_t succ;
+                ag_life_make_successor(r, &succ, ag_rand_u32(), t);
+                succ.rec_id = ag_pool_rec_id(succ.addr_type, succ.orig_addr,
+                                             succ.payload, succ.payload_len);
+                succ.next_rotate_ms = t + ag_life_draw_rotate_ms(&s_rng);
+#ifdef AG_ONAIR_TEST
+                // Rig hook: announce the address swap so the harness can confirm a
+                // ROTATING ghost churns on-air and the lineage keeps its TTL.
+                ESP_LOGI(TAG, "ONAIR rotate old=%02x:%02x:%02x:%02x:%02x:%02x "
+                         "new=%02x:%02x:%02x:%02x:%02x:%02x first_seen=%u next=%u",
+                         r->orig_addr[0], r->orig_addr[1], r->orig_addr[2],
+                         r->orig_addr[3], r->orig_addr[4], r->orig_addr[5],
+                         succ.orig_addr[0], succ.orig_addr[1], succ.orig_addr[2],
+                         succ.orig_addr[3], succ.orig_addr[4], succ.orig_addr[5],
+                         (unsigned)succ.first_seen_ms, (unsigned)succ.next_rotate_ms);
+#endif
+                *r = succ;  // rotate in place; keeps the round-robin slot/eligibility
+            }
+        }
     }
 }

@@ -1,9 +1,26 @@
 // lifecycle_logic.c — portable rotation/departure decisions (host-tested in test_lifecycle.c).
 #include "lifecycle_logic.h"
+#include <math.h>
 #include <string.h>
 
 // nominal cadence when interval_q has not been estimated yet (ms).
 #define AG_LIFE_NOMINAL_INTERVAL_MS 1000u
+// Address-rotation period for ROTATING (NRPA-class) ghosts: log-normal located
+// at ~15 min (RPA-like churn), clamped to the BLE Core advertising-interval-style
+// band [1 min, 1 h] (cf. 0x0001..0x0E10). Per-ghost independent — drawn once per
+// scheduling, never shared across the cohort (avoids correlated rotation).
+#ifdef AG_ONAIR_TEST
+// On-air rig only: compress the period to seconds so the two-board test can watch
+// a ghost actually swap address within a run. Production keeps the 15 min median.
+#define AG_LIFE_ROTATE_MEDIAN_MS (8u * 1000u)
+#define AG_LIFE_ROTATE_MIN_MS    (4u * 1000u)
+#define AG_LIFE_ROTATE_MAX_MS    (20u * 1000u)
+#else
+#define AG_LIFE_ROTATE_MEDIAN_MS (15u * 60u * 1000u)
+#define AG_LIFE_ROTATE_MIN_MS    (1u * 60u * 1000u)
+#define AG_LIFE_ROTATE_MAX_MS    (60u * 60u * 1000u)
+#endif
+#define AG_LIFE_ROTATE_SIGMA     0.55f
 // post-departure grace window bounds (ms): [2,12] minutes.
 #define AG_LIFE_GRACE_MIN_MS (2u * 60u * 1000u)
 #define AG_LIFE_GRACE_MAX_MS (12u * 60u * 1000u)
@@ -118,4 +135,36 @@ void ag_life_make_successor(const ag_beacon_record_t *parent,
     child->obs_count = 1;
     child->flags = (uint8_t)(parent->flags & ~AG_FLAG_DEPARTING);
     child->rec_id = 0;  // wrapper recomputes from the new addr + payload
+}
+
+ag_life_rotation_mode_t ag_life_rotation_mode(uint8_t cls)
+{
+    // Only the NRPA class rotates: real non-resolvable-private sources mint a
+    // fresh address periodically, so a rotating ghost of one is realistic.
+    // Static-random / public / Wi-Fi hold a single address for life (correct for
+    // iBeacon/Eddystone/APs, which do not rotate; making them rotate would be
+    // unrealistic for those device classes).
+    // Captured RPA (0b01) is never cloned at all (eligibility gate / artifact G),
+    // so it never reaches here as a replayable ghost.
+    return (cls == AG_CLASS_NRPA_BLE) ? AG_LIFE_ROTATING : AG_LIFE_STATIONARY_HOLD;
+}
+
+uint32_t ag_life_draw_rotate_ms(ag_prng_t *rng)
+{
+    // Log-normal located at the ~15 min median; clamp into the [1 min, 1 h] band.
+    // Mirrors ag_evict_draw_base_ttl's shape so rotation churn and lineage death
+    // share one statistical idiom.
+    float mu = logf((float)AG_LIFE_ROTATE_MEDIAN_MS);
+    float z = ag_prng_gauss(rng, 0.0f, 1.0f);
+    float ms = expf(mu + AG_LIFE_ROTATE_SIGMA * z);
+    if (ms < (float)AG_LIFE_ROTATE_MIN_MS) ms = (float)AG_LIFE_ROTATE_MIN_MS;
+    if (ms > (float)AG_LIFE_ROTATE_MAX_MS) ms = (float)AG_LIFE_ROTATE_MAX_MS;
+    return (uint32_t)ms;
+}
+
+bool ag_life_rotation_due(const ag_beacon_record_t *r, uint32_t now_ms)
+{
+    // A rotation is due once the scheduled deadline passes. next_rotate_ms == 0
+    // means unscheduled (stationary, or not yet armed) — never due.
+    return r->next_rotate_ms != 0u && now_ms >= r->next_rotate_ms;
 }

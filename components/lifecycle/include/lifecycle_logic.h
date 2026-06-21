@@ -29,6 +29,14 @@ typedef enum {
     AG_LIFE_EXPIRE,     // past the post-departure grace window: retire the record
 } ag_life_action_t;
 
+// Per-ghost address-rotation behavior (§A6.3). STATIONARY_HOLD ghosts keep one
+// cloned address for life; ROTATING ghosts swap to a fresh NRPA on a per-ghost
+// independent ~15 min timer and keep doing so until the lineage's TTL completes.
+typedef enum {
+    AG_LIFE_STATIONARY_HOLD = 0, // static-random / public / Wi-Fi: never rotate
+    AG_LIFE_ROTATING,            // NRPA class: rotate to fresh NRPA on the timer
+} ag_life_rotation_mode_t;
+
 // Estimated advertising cadence in ms from interval_q (0.625 ms TU units:
 // ms = q * 5 / 8). Returns 0 when interval_q is 0 (cadence not yet estimated).
 uint32_t ag_life_interval_ms(uint16_t interval_q);
@@ -65,6 +73,18 @@ ag_life_action_t ag_life_tick_record(ag_beacon_record_t *r, uint32_t now_ms,
 void ag_life_make_successor(const ag_beacon_record_t *parent,
                             ag_beacon_record_t *child, uint32_t new_addr_seed,
                             uint32_t now_ms);
+
+// Rotation mode for a record's beacon class (§A6.3): AG_LIFE_ROTATING for the
+// NRPA class, AG_LIFE_STATIONARY_HOLD for everything else.
+ag_life_rotation_mode_t ag_life_rotation_mode(uint8_t cls);
+
+// Draw a per-ghost address-rotation period (ms): log-normal located at ~15 min,
+// clamped to [1 min, 1 h]. Independent per call (no cohort correlation).
+uint32_t ag_life_draw_rotate_ms(ag_prng_t *rng);
+
+// True when a ROTATING ghost's scheduled rotation deadline (next_rotate_ms) has
+// passed. next_rotate_ms == 0 (unscheduled / stationary) is never due.
+bool ag_life_rotation_due(const ag_beacon_record_t *r, uint32_t now_ms);
 
 #ifdef __cplusplus
 }

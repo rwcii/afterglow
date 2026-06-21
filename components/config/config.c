@@ -31,6 +31,7 @@ void afterglow_config_defaults(afterglow_config_t *cfg)
         .w_rec = 0.30f, .w_rssi = 0.15f, .w_rnd = 0.25f, .w_cls = 0.35f, .w_div = 0.20f,
         .tau_sel_s = 120.0f, .replay_min_sightings = 3,
         .own_device_exclude = true, .own_device_window_ms = 600000, .depart_gap_mult = 5,
+        .rotation_enabled = true,
 
         .ble_adv_sets = 1, .max_concurrent_ghosts = 8, .rotate_ms = 750,
         .match_interval = true, .interval_jitter_pct = 3, .spawn_jitter_ms_max = 60000,
