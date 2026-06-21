@@ -76,7 +76,7 @@ static ag_beacon_record_t *feed(ag_beacon_record_t *slab, uint16_t *count,
     int idx = ag_pool_admit(slab, count, CAP, cap, addr, /*addr_type=*/1,
                             now_ms, /*node_id=*/0, evp, rng);
     if (idx < 0) return NULL;
-    ag_classify_observe(&slab[idx], MIN_SIGHT);
+    ag_classify_observe(&slab[idx], MIN_SIGHT, /*require_beacon_payload=*/true);
     return &slab[idx];
 }
 

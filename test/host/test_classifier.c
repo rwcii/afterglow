@@ -45,7 +45,7 @@ static void observe_n(ag_beacon_record_t *r, int n)
 {
     for (int i = 0; i < n; i++) {
         if (r->obs_count < 255) r->obs_count++;
-        ag_classify_observe(r, MIN_SIGHT);
+        ag_classify_observe(r, MIN_SIGHT, /*require_beacon_payload=*/true);
     }
 }
 
@@ -172,7 +172,7 @@ int main(void)
                                       BEACON_AD, sizeof BEACON_AD);
         observe_n(&r, MIN_SIGHT);
         ag_beacon_record_t snap = r;
-        ag_classify_observe(&r, MIN_SIGHT);     // same obs_count, no new sighting
+        ag_classify_observe(&r, MIN_SIGHT, true); // same obs_count, no new sighting
         CHECK(r.cls == snap.cls && r.flags == snap.flags);
     }
 

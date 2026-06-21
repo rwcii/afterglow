@@ -57,7 +57,8 @@ ag_elig_class_t ag_classify_elig_class(uint8_t cls)
     }
 }
 
-void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings)
+void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings,
+                         bool require_beacon_payload)
 {
     if (rec == NULL) return;
 
@@ -85,6 +86,11 @@ void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings)
                 rec->payload + AG_ADVA_LEN,
                 (uint8_t)(rec->payload_len - AG_ADVA_LEN));
         }
+        // Payload-class requirement: a recognized broadcast-beacon payload is
+        // required for promotion unless the policy relaxes it. When not required,
+        // the requirement is satisfied so subtype + persistence alone promote.
+        // Default-true preserves the strict behavior.
+        bool payload_ok = beacon_like || !require_beacon_payload;
 
         if (sub == AG_RANDSUB_RPA) {
             // Resolvable-private addresses rotate faster than sightings can
@@ -92,13 +98,13 @@ void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings)
             // any one address stays low. Keep RPA regardless of obs_count.
             rec->cls = AG_CLASS_RPA_BLE;
         } else if (sub == AG_RANDSUB_NRPA) {
-            // Non-resolvable: promote to NRPA only once persistent + beacon-like.
-            if (stable && beacon_like) rec->cls = AG_CLASS_NRPA_BLE;
+            // Non-resolvable: promote to NRPA only once persistent + payload_ok.
+            if (stable && payload_ok) rec->cls = AG_CLASS_NRPA_BLE;
             else if (rec->cls != AG_CLASS_NRPA_BLE) rec->cls = AG_CLASS_TENTATIVE;
         } else {
             // Static-random (0b11) or reserved: promote to static-random once a
-            // persistent address with a recognized beacon payload is confirmed.
-            if (stable && beacon_like) rec->cls = AG_CLASS_STATIC_RANDOM_BLE;
+            // persistent address with a satisfied payload requirement is confirmed.
+            if (stable && payload_ok) rec->cls = AG_CLASS_STATIC_RANDOM_BLE;
             else if (rec->cls != AG_CLASS_STATIC_RANDOM_BLE) rec->cls = AG_CLASS_TENTATIVE;
         }
     }

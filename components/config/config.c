@@ -35,6 +35,7 @@ void afterglow_config_defaults(afterglow_config_t *cfg)
         .ble_adv_sets = 1, .max_concurrent_ghosts = 8, .rotate_ms = 750,
         .match_interval = true, .interval_jitter_pct = 3, .spawn_jitter_ms_max = 60000,
         .wifi_beacons_enabled = false, .ble_enabled = true,
+        .require_broadcast_only = true, .require_beacon_payload = true,
         .fast_cadence_policy = AG_FAST_SLOW_AND_FLAG,
 
         .txentropy_enabled = true,
@@ -96,6 +97,8 @@ void afterglow_config_clamp(afterglow_config_t *cfg)
     CLAMP_U(cfg->rotate_ms, 250, 2000);
     CLAMP_U(cfg->interval_jitter_pct, 1, 25);      // NEVER 0 (would pin equal)
     if (cfg->spawn_jitter_ms_max > 300000) cfg->spawn_jitter_ms_max = 300000; // floor is 0 (unsigned)
+    // require_broadcast_only / require_beacon_payload are bools — already in range;
+    // both restored to true on every defaults load (conservative factory reset).
 
     // Group E — TX entropy.
     CLAMP_U(cfg->ble_min_lvl, -24, cfg->ble_max_lvl);
