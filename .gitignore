@@ -1,4 +1,5 @@
 _tmp/
+_handoff/
 
 # ESP-IDF build artifacts (root project + test/target subproject)
 /build/
