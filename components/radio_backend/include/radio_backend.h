@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "ag_core/ag_eligible.h" // ag_adv_kind_t — observed PDU behavior
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +32,10 @@ typedef struct {
     uint64_t   ts_us;         // local capture timestamp (esp_timer)
     const uint8_t *frame;     // raw frame / adv payload
     uint16_t   frame_len;
+    // Observed PDU behavior, read from the adv-report event type (BLE) or the
+    // mgmt subtype (Wi-Fi). AG_ADV_UNKNOWN if the backend could not determine it;
+    // the eligibility gate fails closed on anything that is not broadcast-only.
+    ag_adv_kind_t adv_kind;
 } ag_capture_t;
 
 typedef void (*ag_capture_cb_t)(const ag_capture_t *cap, void *user);

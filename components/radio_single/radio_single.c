@@ -93,8 +93,28 @@ static void wifi_promisc_rx(void *buf, wifi_promiscuous_pkt_type_t type)
         .frame = pkt->payload,
         // sig_len includes the 4-byte FCS; strip it (templates store body only).
         .frame_len = (uint16_t)(pkt->rx_ctrl.sig_len - 4),
+        // A beacon (mgmt subtype 8) is a broadcast mgmt frame by definition; we
+        // only forward subtype-8 frames here, so the observed behavior is fixed.
+        .adv_kind = AG_ADV_NONCONN_NONSCAN,
     };
     s_cap_cb(&cap, s_cap_user);
+}
+
+// Map the Bluedroid adv-report event type to the portable PDU-behavior kind.
+// The eligibility gate clones only broadcast-only (NONCONN_NONSCAN) sources, so
+// every connectable/scannable variant — and a scan response, which only exists
+// for a scannable advertiser — must surface as the corresponding unsafe kind.
+// Unrecognized values fail closed to AG_ADV_UNKNOWN.
+static ag_adv_kind_t ble_evt_to_adv_kind(esp_ble_evt_type_t t)
+{
+    switch (t) {
+        case ESP_BLE_EVT_NON_CONN_ADV: return AG_ADV_NONCONN_NONSCAN; // ADV_NONCONN_IND
+        case ESP_BLE_EVT_DISC_ADV:     return AG_ADV_SCANNABLE;       // ADV_SCAN_IND
+        case ESP_BLE_EVT_CONN_ADV:                                    // ADV_IND
+        case ESP_BLE_EVT_CONN_DIR_ADV: return AG_ADV_CONNECTABLE;     // ADV_DIRECT_IND
+        case ESP_BLE_EVT_SCAN_RSP:     return AG_ADV_SCANNABLE;       // implies scannable
+        default:                       return AG_ADV_UNKNOWN;
+    }
 }
 
 // --- BLE passive scan: surface legacy advertisements to the capture cb ------
@@ -124,6 +144,10 @@ static void ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p)
         .ts_us = (uint64_t)esp_timer_get_time(),
         .frame = buf,
         .frame_len = (uint16_t)(6 + adv_len),
+        // Observed PDU behavior from the adv-report event type. A connectable or
+        // scannable source surfaces as such here so the eligibility gate refuses
+        // to clone it as a broadcast-only ghost.
+        .adv_kind = ble_evt_to_adv_kind(r->ble_evt_type),
     };
     s_cap_cb(&cap, s_cap_user);
 }

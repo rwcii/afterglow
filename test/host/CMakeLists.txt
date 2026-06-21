@@ -66,7 +66,7 @@ foreach(t test_eviction test_txwalk test_subset test_meshguard)
 endforeach()
 
 # --- component-logic tests (host shims) -----------------------------------
-foreach(t test_config test_pool test_classifier test_lifecycle test_mesh)
+foreach(t test_config test_pool test_classifier test_adv_kind test_lifecycle test_mesh)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE components_host afterglow_core)
     add_test(NAME ${t} COMMAND ${t})

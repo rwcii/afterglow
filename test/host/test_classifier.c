@@ -16,6 +16,9 @@ static const uint8_t BEACON_AD[] = { 0x05, 0xFF, 0x4C, 0x00, 0x02, 0x15 };
 static const uint8_t PLAIN_AD[]  = { 0x02, 0x01, 0x06 };
 
 // Build a fresh random-BLE record. msb sets orig_addr[5] (random subtype bits).
+// The stored payload mirrors the captured frame layout used everywhere on-device:
+// AdvA(6) || AdvData. The classifier reads beacon framing from after the AdvA,
+// so the AD list must sit at offset 6 (not byte 0).
 static ag_beacon_record_t mk_ble(uint8_t msb, ag_adv_kind_t kind,
                                  const uint8_t *ad, uint8_t adlen)
 {
@@ -26,8 +29,9 @@ static ag_beacon_record_t mk_ble(uint8_t msb, ag_adv_kind_t kind,
     r.cls = AG_CLASS_TENTATIVE;
     r.adv_kind = (uint8_t)kind;
     r.orig_addr[5] = msb;
-    memcpy(r.payload, ad, adlen);
-    r.payload_len = adlen;
+    memcpy(r.payload, r.orig_addr, 6);       // AdvA prefix (as captured)
+    memcpy(r.payload + 6, ad, adlen);        // AdvData follows
+    r.payload_len = (uint8_t)(6 + adlen);
     return r;
 }
 

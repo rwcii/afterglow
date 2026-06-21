@@ -5,6 +5,11 @@
 // BLE address types as observed on the wire: 0 = public, 1 = random.
 enum { AG_ADDR_PUBLIC = 0, AG_ADDR_RANDOM = 1 };
 
+// Captured BLE frames (and the stored payload) are AdvA(6) || AdvData; the AD
+// list starts after the address. Matches the marshalling in radio_single.c and
+// the identity extraction in pool.c.
+enum { AG_ADVA_LEN = 6 };
+
 ag_rand_subtype_t ag_classify_rand_subtype(const uint8_t orig_addr[6])
 {
     // Top two bits of the most-significant address byte carry the random subtype.
@@ -70,7 +75,16 @@ void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings)
         // TENTATIVE additionally requires a recognized beacon payload and a
         // persistent address over >= min_sightings.
         ag_rand_subtype_t sub = ag_classify_rand_subtype(rec->orig_addr);
-        bool beacon_like = ag_classify_beacon_payload(rec->payload, rec->payload_len);
+        // The stored payload is the captured frame: AdvA(6) || AdvData. The AD
+        // list begins after the 6-byte address, so the beacon-framing walk must
+        // start there — walking from byte 0 reads the address bytes as bogus AD
+        // length/type fields and almost never recognizes a real beacon.
+        bool beacon_like = false;
+        if (rec->payload_len > AG_ADVA_LEN) {
+            beacon_like = ag_classify_beacon_payload(
+                rec->payload + AG_ADVA_LEN,
+                (uint8_t)(rec->payload_len - AG_ADVA_LEN));
+        }
 
         if (sub == AG_RANDSUB_RPA) {
             // Resolvable-private addresses rotate faster than sightings can
@@ -89,14 +103,13 @@ void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings)
         }
     }
 
-    // adv_kind: default broadcast-only for beacon-like BLE; leave any
-    // observed scannable/connectable kind in place (the capture path sets it
-    // from the PDU header). Wi-Fi beacons are inherently broadcast.
-    if (rec->proto == AG_PROTO_WIFI) {
-        rec->adv_kind = AG_ADV_NONCONN_NONSCAN;
-    } else if (rec->adv_kind > AG_ADV_CONNECTABLE) {
-        rec->adv_kind = AG_ADV_NONCONN_NONSCAN;
-    }
+    // adv_kind is the OBSERVED PDU behavior, owned by the capture/merge path
+    // (radio_single reads it from the adv-report event type; pool_admit keeps
+    // the stickiest-unsafe value across resightings). The classifier refines the
+    // address class, never the kind — overwriting it here would re-open the
+    // fail-closed gate, so it is left untouched. A connectable/scannable source,
+    // or one whose kind is still AG_ADV_UNKNOWN, is not broadcast-only and is
+    // therefore ineligible below.
 
     // Eligibility flag: only when persistent AND the class is reproducible AND
     // the advertisement is broadcast-only. Otherwise clear it.

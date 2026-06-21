@@ -21,11 +21,25 @@ extern "C" {
 #endif
 
 // BLE advertising PDU type, by the connectable/scannable bits in the PDU header.
+// Ordered safe→unsafe so the merge rule below can keep the most-unsafe kind ever
+// observed under one identity (see ag_adv_kind_merge). AG_ADV_UNKNOWN is the
+// fail-closed default carried until the capture path parses the real PDU header:
+// it is NOT broadcast-only, so the predicate refuses it, yet it yields to the
+// first genuine observation so a real broadcast-only source can still become
+// eligible.
 typedef enum {
     AG_ADV_NONCONN_NONSCAN = 0, // ADV_NONCONN_IND — broadcast only (eligible)
     AG_ADV_SCANNABLE,           // ADV_SCAN_IND
     AG_ADV_CONNECTABLE,         // ADV_IND / ADV_DIRECT_IND
+    AG_ADV_UNKNOWN,             // not yet parsed — fail closed (ineligible)
 } ag_adv_kind_t;
+
+// Merge two observations of the same identity's PDU behavior: "stickiest-unsafe
+// wins". A genuine unsafe observation (scannable/connectable) can never be
+// downgraded by a later broadcast-only sighting; AG_ADV_UNKNOWN is the only kind
+// a real observation replaces. Used on resighting/merge so a source that ever
+// advertised connectably stays ineligible forever.
+ag_adv_kind_t ag_adv_kind_merge(ag_adv_kind_t a, ag_adv_kind_t b);
 
 // Address-type class for the reproducibility gate (mirrors pool.h classes).
 typedef enum {
