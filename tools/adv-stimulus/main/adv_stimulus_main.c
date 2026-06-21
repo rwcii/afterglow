@@ -94,6 +94,12 @@ static void advertise(char cmd, uint8_t subtype, bool connectable, uint8_t tag)
     // Set the address with retries: the controller rejects a rand-addr change
     // while advertising is still winding down, so retry until it takes (or the
     // address is genuinely invalid, as in the reserved/RPA negative cases).
+    // Clear the completion flag FIRST: it is sticky-true from the previous
+    // command's success, and the loop guard reads it — without this reset the
+    // loop body never runs, set_rand_addr is never re-issued, and the prior
+    // address stays on air (e.g. a later NRPA 'n' keeps emitting the static 's'
+    // address). The per-attempt reset inside the loop is not enough.
+    s_addr_set = false;
     esp_err_t rc = ESP_FAIL;
     for (int attempt = 0; attempt < 5 && !s_addr_set; attempt++) {
         s_addr_set = false;
