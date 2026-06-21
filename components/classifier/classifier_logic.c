@@ -13,7 +13,10 @@ enum { AG_ADVA_LEN = 6 };
 ag_rand_subtype_t ag_classify_rand_subtype(const uint8_t orig_addr[6])
 {
     // Top two bits of the most-significant address byte carry the random subtype.
-    return (ag_rand_subtype_t)((orig_addr[5] >> 6) & 0x3u);
+    // orig_addr holds the AdvA as the backend surfaces it (esp_bd_addr_t order,
+    // most-significant octet first), so the subtype byte is orig_addr[0] — the
+    // same octet handed to esp_ble_gap_set_rand_addr on the emit/clone path.
+    return (ag_rand_subtype_t)((orig_addr[0] >> 6) & 0x3u);
 }
 
 bool ag_classify_beacon_payload(const uint8_t *payload, uint8_t payload_len)
