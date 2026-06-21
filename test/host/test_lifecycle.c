@@ -154,5 +154,70 @@ int main(void)
                   s, cs.orig_addr[0]);
     }
 
+    // --- rotation mode (§A6.3) -------------------------------------------
+    // Only the NRPA class rotates; everything cloneable else holds.
+    CHECK(ag_life_rotation_mode(AG_CLASS_NRPA_BLE) == AG_LIFE_ROTATING);
+    CHECK(ag_life_rotation_mode(AG_CLASS_STATIC_RANDOM_BLE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_PUBLIC_BLE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_WIFI) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_TENTATIVE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_RPA_BLE) == AG_LIFE_STATIONARY_HOLD);
+
+    // --- rotation period draw: log-normal clamped to [1 min, 1 h] ---------
+    {
+        uint32_t lo = 1u * 60u * 1000u, hi = 60u * 60u * 1000u;
+        uint64_t sum = 0; int N = 4000;
+        for (int k = 0; k < N; k++) {
+            uint32_t ms = ag_life_draw_rotate_ms(&rng);
+            CHECK_MSG(ms >= lo && ms <= hi,
+                      "rotate period %u out of [%u,%u]", ms, lo, hi);
+            sum += ms;
+        }
+        uint32_t mean = (uint32_t)(sum / (uint64_t)N);
+        // log-normal located at 15 min — mean sits modestly above the median;
+        // just assert it lands in a sane minutes-scale band (not pinned to a clamp).
+        CHECK_MSG(mean > 10u * 60u * 1000u && mean < 30u * 60u * 1000u,
+                  "rotate-period mean %u ms outside the expected band", mean);
+    }
+
+    // --- rotation-due predicate ------------------------------------------
+    {
+        ag_beacon_record_t due = mk_rec();
+        due.next_rotate_ms = 0;               // unscheduled -> never due
+        CHECK(!ag_life_rotation_due(&due, 1000000u));
+        due.next_rotate_ms = 50000u;
+        CHECK(!ag_life_rotation_due(&due, 49999u));
+        CHECK(ag_life_rotation_due(&due, 50000u));
+        CHECK(ag_life_rotation_due(&due, 60000u));
+    }
+
+    // --- rotate-in-place sequence: lineage ages, address churns to NRPA,
+    //     never triggered by departure -------------------------------------
+    {
+        ag_beacon_record_t g = mk_rec();
+        g.cls = AG_CLASS_NRPA_BLE;
+        g.orig_addr[0] = 0x00;               // NRPA parent
+        g.first_seen_ms = 10000u;
+        g.base_ttl_s = 600.0f;
+        g.last_seen_ms = 200000u;            // present (not departed)
+        uint32_t parent_first = g.first_seen_ms;
+        float parent_ttl = g.base_ttl_s;
+        uint8_t prev_addr[6];
+        memcpy(prev_addr, g.orig_addr, 6);
+
+        // simulate three rotations
+        for (int k = 0; k < 3; k++) {
+            ag_beacon_record_t s;
+            ag_life_make_successor(&g, &s, ag_prng_u32(&rng), 200000u + k * 1000u);
+            s.next_rotate_ms = (200000u + k * 1000u) + ag_life_draw_rotate_ms(&rng);
+            g = s;
+            CHECK_MSG((g.orig_addr[0] & 0xC0) == 0x00, "rotated addr not NRPA");
+            CHECK_MSG(memcmp(g.orig_addr, prev_addr, 6) != 0, "rotation reused address");
+            CHECK_MSG(g.first_seen_ms == parent_first, "rotation reset lineage age");
+            CHECK_MSG(g.base_ttl_s == parent_ttl, "rotation changed lineage TTL");
+            memcpy(prev_addr, g.orig_addr, 6);
+        }
+    }
+
     TEST_SUMMARY();
 }
