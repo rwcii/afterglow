@@ -83,7 +83,7 @@ static void emit_hello(void)
     adv[8] = MESH_VERSION;
     ag_emit_t e = {
         .proto = AG_PROTO_BLE, .frame = adv, .frame_len = sizeof(adv),
-        .channel = 37, .tx_power_idx = 8, .interval_ms = 100,
+        .channel = 37, .tx_power_idx = 8, .interval_ms = 100, .priority = true,
     };
     radio_backend_get()->emit(&e);
 }
@@ -124,12 +124,13 @@ static void transfer_to_peer(uint16_t peer_lo16)
             memcpy(&adv[9], r->payload + off, body);
             ag_emit_t e = {
                 .proto = AG_PROTO_BLE, .frame = adv, .frame_len = (uint16_t)(9 + body),
-                .channel = 37, .tx_power_idx = 8, .interval_ms = 100,
+                .channel = 37, .tx_power_idx = 8, .interval_ms = 100, .priority = true,
             };
             radio_backend_get()->emit(&e);
         }
         sent++;
     }
+    if (sent) ESP_LOGI(TAG, "transferred %u records to peer %04x", sent, peer_lo16);
 }
 
 // Gate one fully-reassembled inbound record against the loop/amplification
