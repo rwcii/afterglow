@@ -51,9 +51,11 @@ bool ag_replay_eligible(const ag_elig_policy_t *pol,
                         ag_adv_kind_t kind,
                         bool is_wifi,
                         bool sightings_ok,
-                        bool is_own_device)
+                        bool is_own_device,
+                        bool source_present)
 {
     if (is_own_device) return false;            // exclude co-located operator gear
+    if (source_present) return false;           // only re-emit an absent source
     if (!sightings_ok) return false;            // stable-sightings gate
     if (!ag_replay_class_cloneable(cls)) return false; // reproducible-address gate
 

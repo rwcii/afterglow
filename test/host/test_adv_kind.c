@@ -60,9 +60,12 @@ static bool eligible(const ag_beacon_record_t *rec)
     ag_elig_policy_t pol = ag_elig_defaults();
     bool sightings_ok = (rec->flags & AG_FLAG_REPLAY_ELIGIBLE) != 0;
     bool is_wifi = (rec->cls == AG_CLASS_WIFI);
+    // source_present=false isolates the adv-kind/class gates under test (the
+    // presence gate is exercised separately).
     return ag_replay_eligible(&pol, ag_classify_elig_class(rec->cls),
                               (ag_adv_kind_t)rec->adv_kind, is_wifi,
-                              sightings_ok, /*is_own_device=*/false);
+                              sightings_ok, /*is_own_device=*/false,
+                              /*source_present=*/false);
 }
 
 // Drive one capture all the way through admit + classify, returning the touched

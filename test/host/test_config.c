@@ -101,14 +101,14 @@ int main(void)
     ag_elig_policy_t pol_def = policy_from_cfg(&def);
     CHECK_MSG(ag_replay_eligible(&pol_def, AG_ELIG_STATIC_RANDOM,
               AG_ADV_CONNECTABLE, /*is_wifi*/false, /*sightings_ok*/true,
-              /*own*/false) == false,
+              /*own*/false, /*source_present*/false) == false,
               "default config admitted a connectable source");
 
     afterglow_config_t wide = def;
     wide.require_broadcast_only = false;
     ag_elig_policy_t pol_wide = policy_from_cfg(&wide);
     CHECK_MSG(ag_replay_eligible(&pol_wide, AG_ELIG_STATIC_RANDOM,
-              AG_ADV_CONNECTABLE, false, true, false) == true,
+              AG_ADV_CONNECTABLE, false, true, false, /*source_present*/false) == true,
               "non-default config did not widen the broadcast-only gate");
 
     // (8) require_beacon_payload gates the payload-class requirement in

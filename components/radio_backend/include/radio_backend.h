@@ -48,6 +48,11 @@ typedef struct {
     ag_proto_t proto;
     const uint8_t *frame;     // BLE: raw AdvData (<=31B); Wi-Fi: beacon template
     uint16_t   frame_len;
+    // BLE only: the 6-byte advertising address to transmit and its type
+    // (0 = public, 1 = random). The backend sets the on-air AdvA from this; the
+    // emitted address type matches the observed one. Unused for Wi-Fi.
+    const uint8_t *addr;
+    uint8_t    addr_type;
     uint8_t    channel;
     int8_t     tx_power_idx;  // normalized; see radio_backend_tx_power_levels
     uint32_t   interval_ms;   // target advertising/beacon interval

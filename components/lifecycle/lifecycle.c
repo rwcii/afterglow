@@ -1,7 +1,8 @@
-// lifecycle.c — rotation-vs-departure successor model (hardware wrapper).
+// lifecycle.c — per-record presence tracking (hardware wrapper).
 // Per-record decisions are the portable, host-tested lifecycle_logic; this
-// wrapper walks the pool, supplies the clock/RNG/config, and applies the
-// own-device exclusion + successor insertion.
+// wrapper walks the pool, supplies the clock/RNG/config, applies the own-device
+// exclusion, and advances each record's presence (departed) state. Record
+// lifetime is owned by the pool eviction sweep's per-record TTL.
 #include "lifecycle.h"
 #include "lifecycle_logic.h"
 #include "pool.h"
@@ -42,22 +43,14 @@ void lifecycle_tick(void)
             continue;
         }
 
-        ag_life_action_t act =
-            ag_life_tick_record(r, t, s_cfg.depart_gap_mult, &s_rng);
-
-        if (act == AG_LIFE_EXPIRE) {
-            // Rotation model: for sources that behaved phone-like (a rotating
-            // class), pair the retirement with a fresh successor carrying a
-            // continuous RSSI trajectory. Static beacons just fade (the eviction
-            // sweep collects them).
-            if (r->cls == AG_CLASS_RPA_BLE || r->cls == AG_CLASS_NRPA_BLE) {
-                ag_beacon_record_t child;
-                ag_life_make_successor(r, &child, ag_rand_u32(), t);
-                pool_insert_record(&child);   // recomputes rec_id
-            }
-            // Mark non-eligible; TTL/dropout in the eviction sweep frees the slot.
-            r->flags &= (uint8_t)~AG_FLAG_REPLAY_ELIGIBLE;
-            r->flags |= AG_FLAG_DEPARTING;
-        }
+        // Advance the per-record presence state: ag_life_tick_record sets
+        // AG_FLAG_DEPARTING once the source has been silent past its
+        // cadence-scaled gap (and the flag is cleared in pool admission the
+        // moment the source is observed again). The departed flag gates emission
+        // — a record is re-emitted only while its source is absent. Record
+        // lifetime is governed solely by the eviction sweep's per-record TTL
+        // (age from first_seen), so departure no longer clears eligibility or
+        // retires the record here.
+        ag_life_tick_record(r, t, s_cfg.depart_gap_mult, &s_rng);
     }
 }

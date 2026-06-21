@@ -24,44 +24,60 @@ int main(void)
 
     // (2) end-to-end: a reproducible static-random identity that passed the
     //     sightings gate is still refused when it is connectable or scannable.
+    // source_present=false throughout (the absent-source condition) except where
+    // the presence gate is the dimension under test in (8).
     CHECK_MSG(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_CONNECTABLE,
-              /*is_wifi*/false, /*sightings_ok*/true, /*own*/false) == false,
+              /*is_wifi*/false, /*sightings_ok*/true, /*own*/false,
+              /*present*/false) == false,
               "a connectable advertisement was marked eligible");
     CHECK_MSG(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_SCANNABLE,
-              false, true, false) == false,
+              false, true, false, false) == false,
               "a scannable advertisement was marked eligible");
 
-    // (3) the accepted path: broadcast-only, reproducible, sighted, not own.
+    // (3) the accepted path: broadcast-only, reproducible, sighted, not own,
+    //     source absent.
     CHECK(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_NONCONN_NONSCAN,
-          false, true, false) == true);
+          false, true, false, false) == true);
     CHECK(ag_replay_eligible(&pol, AG_ELIG_NRPA, AG_ADV_NONCONN_NONSCAN,
-          false, true, false) == true);
+          false, true, false, false) == true);
 
     // (4) reproducibility gate: RPA/PUBLIC never eligible
     //     even when broadcast-only.
     CHECK(ag_replay_eligible(&pol, AG_ELIG_RPA, AG_ADV_NONCONN_NONSCAN,
-          false, true, false) == false);
+          false, true, false, false) == false);
     CHECK(ag_replay_eligible(&pol, AG_ELIG_PUBLIC, AG_ADV_NONCONN_NONSCAN,
-          false, true, false) == false);
+          false, true, false, false) == false);
 
     // (5) gates compose: own-device and un-sighted are always refused.
     CHECK(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_NONCONN_NONSCAN,
-          false, /*sightings_ok*/false, false) == false);
+          false, /*sightings_ok*/false, false, false) == false);
     CHECK(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_NONCONN_NONSCAN,
-          false, true, /*own*/true) == false);
+          false, true, /*own*/true, false) == false);
 
     // (6) Wi-Fi obeys its master switch (ships disabled).
     CHECK(ag_replay_eligible(&pol, AG_ELIG_WIFI_BSSID, AG_ADV_NONCONN_NONSCAN,
-          /*is_wifi*/true, true, false) == false);    // disabled by default
+          /*is_wifi*/true, true, false, false) == false);    // disabled by default
     pol.wifi_beacons_enabled = true;
     CHECK(ag_replay_eligible(&pol, AG_ELIG_WIFI_BSSID, AG_ADV_NONCONN_NONSCAN,
-          true, true, false) == true);
+          true, true, false, false) == true);
 
     // (7) explicit opt-out: disabling the broadcast-only filter widens the
     //     predicate to admit scannable/connectable advertisements.
     pol = ag_elig_defaults();
     pol.require_broadcast_only = false;
     CHECK(ag_replay_adv_safe(&pol, AG_ADV_CONNECTABLE) == true);
+
+    // (8) presence gate: an otherwise-accepted record is refused while its
+    //     source is still present, and admitted once the source is absent. This
+    //     holds independently of the other gates.
+    pol = ag_elig_defaults();
+    CHECK_MSG(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_NONCONN_NONSCAN,
+              false, /*sightings_ok*/true, /*own*/false,
+              /*present*/true) == false,
+              "a present source was marked eligible");
+    CHECK_MSG(ag_replay_eligible(&pol, AG_ELIG_STATIC_RANDOM, AG_ADV_NONCONN_NONSCAN,
+              false, true, false, /*present*/false) == true,
+              "an absent reproducible source was wrongly refused");
 
     TEST_SUMMARY();
 }

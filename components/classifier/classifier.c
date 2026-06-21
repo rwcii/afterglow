@@ -49,7 +49,13 @@ bool classifier_replay_eligible(const ag_beacon_record_t *rec)
     // (set by ag_classify_observe once stable). Compose with the policy gate.
     bool sightings_ok = (rec->flags & AG_FLAG_REPLAY_ELIGIBLE) != 0;
     bool is_wifi = (rec->cls == AG_CLASS_WIFI);
+    // The source is considered present until lifecycle marks it departed (silent
+    // past its cadence-scaled gap); the departed flag is cleared the instant the
+    // source is observed again, so a record is re-emitted only while its source
+    // is absent.
+    bool source_present = (rec->flags & AG_FLAG_DEPARTING) == 0;
     return ag_replay_eligible(&s_pol, ag_classify_elig_class(rec->cls),
                               (ag_adv_kind_t)rec->adv_kind, is_wifi,
-                              sightings_ok, /*is_own_device=*/false);
+                              sightings_ok, /*is_own_device=*/false,
+                              source_present);
 }

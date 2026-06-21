@@ -66,13 +66,17 @@ bool ag_replay_adv_safe(const ag_elig_policy_t *pol, ag_adv_kind_t kind);
 
 // Combined replay-eligibility decision. `sightings_ok` is the stable-sightings
 // gate result (>= min sightings); `is_own_device` excludes co-located operator
-// gear. Returns true only if ALL gates pass.
+// gear; `source_present` is true while the original source is still being
+// observed — a record is replayed only once its source is absent, so this
+// returns false whenever source_present is true. Returns true only if ALL gates
+// pass.
 bool ag_replay_eligible(const ag_elig_policy_t *pol,
                         ag_elig_class_t cls,
                         ag_adv_kind_t kind,
                         bool is_wifi,
                         bool sightings_ok,
-                        bool is_own_device);
+                        bool is_own_device,
+                        bool source_present);
 
 #ifdef __cplusplus
 }

@@ -58,10 +58,13 @@ static const char *TAG = "radio_single";
                                  // without dropping fragments
 #define ADV_Q_LO_DEPTH    8      // replay ghosts: best-effort, drop when full
 #define ADV_DATA_SET_BIT  BIT0   // event-group bit: raw AdvData config completed
+#define ADV_ADDR_SET_BIT  BIT1   // event-group bit: random adv address applied
 
 typedef struct {
     uint8_t  frame[ADV_REQ_FRAME_MAX];
     uint16_t frame_len;
+    uint8_t  addr[6];        // adv address to set before this frame (BLE replay)
+    bool     has_addr;       // false for mesh frames (use the device address)
     uint32_t interval_ms;
     int8_t   tx_power_idx;
 } adv_req_t;
@@ -127,6 +130,17 @@ static void ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p)
         if (s_adv_evt) xEventGroupSetBits(s_adv_evt, ADV_DATA_SET_BIT);
         return;
     }
+    // The controller raises this once a set_rand_addr has been applied; the
+    // arbiter waits on it before configuring AdvData so the address is in effect
+    // for the frame that follows. Only signal on success — a rejected address
+    // (e.g. a degenerate random part) must leave the bit clear so the arbiter
+    // times out and skips the frame rather than advertising under a stale one.
+    if (event == ESP_GAP_BLE_SET_STATIC_RAND_ADDR_EVT) {
+        if (s_adv_evt && p->set_rand_addr_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            xEventGroupSetBits(s_adv_evt, ADV_ADDR_SET_BIT);
+        }
+        return;
+    }
     if (event != ESP_GAP_BLE_SCAN_RESULT_EVT) return;
     struct ble_scan_result_evt_param *r = &p->scan_rst;
     if (r->search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) return;
@@ -166,12 +180,36 @@ static void adv_apply_power(int8_t tx_power_idx)
 // started, held a minimum dwell, stopped) before the next request is serviced.
 static void adv_service(const adv_req_t *req)
 {
+    // ADV_TYPE_NONCONN_IND only: every emitted frame is non-connectable and
+    // non-scannable. This is a legacy advertising instance, so no CTE, extended,
+    // or periodic (AUX_*) advertising is ever produced.
     static esp_ble_adv_params_t adv = {
         .adv_type = ADV_TYPE_NONCONN_IND,
         .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
         .channel_map = ADV_CHNL_ALL,
         .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
     };
+    // Replay frames carry their own advertising address: load it and advertise
+    // from the random address type so the on-air AdvA is the supplied address,
+    // not the device's public address. Mesh frames carry none and keep the
+    // device public address.
+    if (req->has_addr) {
+        xEventGroupClearBits(s_adv_evt, ADV_ADDR_SET_BIT);
+        esp_err_t arc = esp_ble_gap_set_rand_addr((uint8_t *)req->addr);
+        if (arc != ESP_OK) {
+            ESP_LOGW(TAG, "set rand addr failed: %d", (int)arc);
+            return;
+        }
+        EventBits_t ab = xEventGroupWaitBits(s_adv_evt, ADV_ADDR_SET_BIT,
+                                             pdTRUE, pdFALSE, pdMS_TO_TICKS(200));
+        if (!(ab & ADV_ADDR_SET_BIT)) {
+            ESP_LOGW(TAG, "set rand addr timed out");
+            return;
+        }
+        adv.own_addr_type = BLE_ADDR_TYPE_RANDOM;
+    } else {
+        adv.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+    }
     // Map interval_ms to the 0.625 ms adv unit; keep min<max (some stacks reject
     // equal bounds).
     uint16_t unit = (uint16_t)((req->interval_ms * 8) / 5);
@@ -359,8 +397,10 @@ static esp_err_t rs_emit(const ag_emit_t *e)
             .frame_len = e->frame_len,
             .interval_ms = e->interval_ms,
             .tx_power_idx = e->tx_power_idx,
+            .has_addr = (e->addr != NULL),
         };
         memcpy(req.frame, e->frame, e->frame_len);
+        if (e->addr) memcpy(req.addr, e->addr, 6);
         QueueHandle_t q = e->priority ? s_adv_q_hi : s_adv_q_lo;
         // Always non-blocking. Mesh transfer enqueues a whole burst from the GAP
         // callback context, so blocking here would stall the scan/capture path;
