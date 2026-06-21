@@ -153,6 +153,7 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
         rec->hop_ttl = out_ttl;
         rec->origin_node = origin_node;   // preserve first air-capturer
         pool_insert_record(rec);
+        ESP_LOGI(TAG, "absorbed rec_id %04x (ttl->%u)", rec->rec_id, out_ttl);
     }
     // REFRESH_LOWER / DROP_* require no absorption.
 }
@@ -241,7 +242,10 @@ bool mesh_try_consume(const ag_capture_t *cap)
     if (type == MESH_TYPE_HELLO && ad_len >= 7) {
         uint32_t peer = (uint32_t)ad[5] | ((uint32_t)ad[6] << 8) | ((uint32_t)ad[7] << 16);
         if (peer == (s_node_id & 0xFFFFFF)) return true;   // our own HELLO
-        if (contact_seen(peer, t)) transfer_to_peer((uint16_t)(peer & 0xFFFF));
+        if (contact_seen(peer, t)) {
+            ESP_LOGI(TAG, "HELLO from peer %06x -> transferring", (unsigned)peer);
+            transfer_to_peer((uint16_t)(peer & 0xFFFF));
+        }
         return true;
     }
     if (type == MESH_TYPE_DATA && ad_len >= 8) {
