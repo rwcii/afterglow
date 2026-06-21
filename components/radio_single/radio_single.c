@@ -19,6 +19,7 @@
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
 #include "esp_bt_main.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -87,15 +88,11 @@ static void ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p)
 static void scheduler_task(void *arg)
 {
     (void)arg;
-    static esp_ble_scan_params_t scan_params = {
-        .scan_type = BLE_SCAN_TYPE_PASSIVE,
-        .own_addr_type = BLE_ADDR_TYPE_RANDOM,
-        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,   // 50 ms
-        .scan_window = 0x30,     // 30 ms
-        .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE,
-    };
-    esp_ble_gap_set_scan_params(&scan_params);
+    // The scanner's random address + scan params are configured asynchronously
+    // from rs_init via the GAP event chain (set_rand_addr ->
+    // SET_STATIC_RAND_ADDR_COMPLETE -> set_scan_params). Give that a moment to
+    // settle before the first scan window.
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     while (s_capturing) {
         // BLE scan segment.
@@ -131,6 +128,18 @@ static esp_err_t rs_init(void)
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(ble_gap_cb));
+
+    // Passive scanner: it never transmits, so it uses the public device address
+    // (no random-address registration dance). Scan params can be set directly.
+    static esp_ble_scan_params_t scan_params = {
+        .scan_type = BLE_SCAN_TYPE_PASSIVE,
+        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
+        .scan_interval = 0x50,   // 50 ms
+        .scan_window = 0x30,     // 30 ms
+        .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE,
+    };
+    ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
 
     // Wi-Fi + BLE software coexistence is enabled via Kconfig
     // (CONFIG_ESP_COEX_SW_COEXIST_ENABLE in sdkconfig.defaults); the two stacks
