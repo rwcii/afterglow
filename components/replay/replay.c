@@ -5,6 +5,7 @@
 #include "classifier.h"
 #include "txentropy.h"
 #include "afterglow_config.h"
+#include "ag_core/ag_txad.h"
 #include "entropy.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -95,10 +96,18 @@ void replay_tick(void)
             // the AdvData bytes as the frame. A record short of a full address is
             // skipped (it cannot be re-emitted with a matching address).
             if (flen < 6) continue;
+            uint8_t *ad = frame + 6;
+            uint8_t ad_len = (uint8_t)(flen - 6);
+            // Keep the TX Power Level (0x0A) AD field consistent with the power
+            // actually radiated this slot: adv_apply_power applies tx_power_idx
+            // as the esp_power_level_t step, whose dBm is -24 + 3*idx.
+            int8_t emit_dbm = (int8_t)(-24 + 3 * (int)e.tx_power_idx);
+            ad_len = ag_txad_apply(ad, ad_len, (uint8_t)s_cfg.txpower_ad_policy,
+                                   emit_dbm);
             e.addr = frame;
             e.addr_type = r->addr_type;
-            e.frame = frame + 6;
-            e.frame_len = (uint16_t)(flen - 6);
+            e.frame = ad;
+            e.frame_len = ad_len;
         }
         radio_backend_get()->emit(&e);
 

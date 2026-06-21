@@ -25,6 +25,7 @@ add_library(afterglow_core STATIC
     ${CORE_DIR}/ag_subset.c
     ${CORE_DIR}/ag_meshguard.c
     ${CORE_DIR}/ag_eligible.c
+    ${CORE_DIR}/ag_txad.c
 )
 target_include_directories(afterglow_core PUBLIC ${CORE_DIR}/include)
 target_link_libraries(afterglow_core PUBLIC m)
@@ -59,7 +60,7 @@ target_link_libraries(components_host PUBLIC afterglow_core m)
 enable_testing()
 
 # --- unit tests -----------------------------------------------------------
-foreach(t test_eviction test_txwalk test_subset test_meshguard)
+foreach(t test_eviction test_txwalk test_subset test_meshguard test_txad)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
