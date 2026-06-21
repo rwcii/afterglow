@@ -33,5 +33,11 @@ CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
+# --- Console: route to USB-Serial-JTAG. The XIAO ESP32-S3 exposes only its
+# native USB (USB-Serial-JTAG); UART0 is not wired to the USB connector, so the
+# default UART console would be invisible over USB. ---
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+
 # --- Logging ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
