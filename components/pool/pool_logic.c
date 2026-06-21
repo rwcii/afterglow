@@ -24,10 +24,15 @@ int ag_pool_find(const ag_beacon_record_t *slab, uint16_t count,
                  uint8_t addr_type, const uint8_t orig_addr[6],
                  const uint8_t *payload, uint8_t payload_len)
 {
-    uint16_t rid = ag_pool_rec_id(addr_type, orig_addr, payload, payload_len);
+    // Identity is the device: addr_type + advertising address. The payload is
+    // NOT part of the match — real beacons rotate mutable bytes (counters,
+    // timestamps) every transmission, so keying identity on the payload would
+    // mint a fresh record per sighting and obs_count could never accumulate.
+    // (payload/payload_len are unused now but kept in the signature so callers
+    // and the host tests stay stable.)
+    (void)payload; (void)payload_len;
     for (uint16_t i = 0; i < count; i++) {
-        if (slab[i].rec_id == rid &&
-            slab[i].addr_type == addr_type &&
+        if (slab[i].addr_type == addr_type &&
             memcmp(slab[i].orig_addr, orig_addr, 6) == 0) {
             return (int)i;
         }
@@ -48,6 +53,11 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
         r->rssi_last = cap->rssi;
         r->rssi_ewma = ag_pool_rssi_ewma(r->rssi_ewma, cap->rssi);
         if (r->obs_count < 255) r->obs_count++;
+        // Refresh the stored payload to the latest sighting so replay emits the
+        // current AdvData. rec_id stays fixed at its first-sighting value: it is
+        // the stable per-record identifier the mesh seen-set/dedup keys on.
+        memcpy(r->payload, cap->frame, plen);
+        r->payload_len = plen;
         // Estimate cadence from the inter-arrival gap (ms → 0.625ms TU units).
         if (now_ms > r->last_seen_ms) {
             uint32_t gap = now_ms - r->last_seen_ms;
