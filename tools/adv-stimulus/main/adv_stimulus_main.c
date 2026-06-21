@@ -34,9 +34,10 @@ static uint8_t s_adv_data[] = {
     0x02, 0x0A, 0xF4,                                     // TX Power = -12 dBm
 };
 
-// Fixed address bodies; the top two bits of byte[5] (printed MSB-first as the
-// first address octet) carry the random subtype and are set per command.
-static uint8_t s_addr[6] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x00 };
+// esp_bd_addr_t is most-significant octet first: s_addr[0] is the MSB (whose
+// top two bits carry the random subtype) and s_addr[5] is the LSB (set per
+// command as a tag so records do not collide).
+static uint8_t s_addr[6] = { 0x00, 0x22, 0x33, 0x44, 0x55, 0x11 };
 
 static esp_ble_adv_params_t s_params = {
     .adv_int_min       = 0xA0,   // 100 ms
@@ -49,9 +50,18 @@ static esp_ble_adv_params_t s_params = {
 static bool s_data_set;
 static bool s_addr_set;
 
+// When advertising is active, a background task cycles the adv instance on/off
+// in short bursts. Two co-located radios on the same channels contend if one
+// advertises continuously; the off gaps let the device under test's
+// time-shared scan reliably land on the source.
+static volatile bool s_active;
+#define BURST_ON_MS  2500
+#define BURST_OFF_MS 1200
+
 static void set_subtype(uint8_t top_bits)
 {
-    s_addr[5] = (uint8_t)((s_addr[5] & 0x3F) | (top_bits << 6));
+    // Subtype bits live in the top two bits of the most-significant octet ([0]).
+    s_addr[0] = (uint8_t)((s_addr[0] & 0x3F) | (top_bits << 6));
 }
 
 static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p)
@@ -74,28 +84,56 @@ static void gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p)
 // commands never collide in the device-under-test's pool.
 static void advertise(char cmd, uint8_t subtype, bool connectable, uint8_t tag)
 {
+    s_active = false;                // pause the burst task before reconfiguring
+    vTaskDelay(pdMS_TO_TICKS(250));  // let it observe the flag and stop advertising
     esp_ble_gap_stop_advertising();
-    vTaskDelay(pdMS_TO_TICKS(50));   // let advertising actually stop before re-addr
-    s_addr[0] = tag;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    s_addr[5] = tag;                 // tag in the least-significant octet
     set_subtype(subtype);
 
-    s_addr_set = false;
-    esp_err_t rc = esp_ble_gap_set_rand_addr(s_addr);
-    // For the reserved/RPA negative cases the controller may reject the address;
-    // report it but still print ground truth so the host knows what was intended.
-    for (int i = 0; i < 100 && !s_addr_set && rc == ESP_OK; i++) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    // Set the address with retries: the controller rejects a rand-addr change
+    // while advertising is still winding down, so retry until it takes (or the
+    // address is genuinely invalid, as in the reserved/RPA negative cases).
+    esp_err_t rc = ESP_FAIL;
+    for (int attempt = 0; attempt < 5 && !s_addr_set; attempt++) {
+        s_addr_set = false;
+        rc = esp_ble_gap_set_rand_addr(s_addr);
+        for (int i = 0; i < 50 && !s_addr_set && rc == ESP_OK; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (!s_addr_set) vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     s_params.adv_type = connectable ? ADV_TYPE_IND : ADV_TYPE_NONCONN_IND;
     s_data_set = false;
     esp_ble_gap_config_adv_data_raw(s_adv_data, sizeof s_adv_data);
     for (int i = 0; i < 20 && !s_data_set; i++) vTaskDelay(pdMS_TO_TICKS(10));
-    esp_ble_gap_start_advertising(&s_params);
+    s_active = true;   // the burst task owns start/stop while active
 
     printf("STIM %c addr=%02x:%02x:%02x:%02x:%02x:%02x type=%s set=%d\n",
-           cmd, s_addr[5], s_addr[4], s_addr[3], s_addr[2], s_addr[1], s_addr[0],
+           cmd, s_addr[0], s_addr[1], s_addr[2], s_addr[3], s_addr[4], s_addr[5],
            connectable ? "conn" : "nonconn", s_addr_set);
+}
+
+// Cycle the active advertisement on/off in bursts so a co-located scanner can
+// interleave. Re-issues the configured params on each on-phase.
+static void burst_task(void *arg)
+{
+    (void)arg;
+    bool on = false;
+    for (;;) {
+        if (!s_active) {
+            if (on) { esp_ble_gap_stop_advertising(); on = false; }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        // On-phase, then off-phase — each polled in 100 ms steps so clearing
+        // s_active takes effect within ~100 ms.
+        esp_ble_gap_start_advertising(&s_params); on = true;
+        for (int i = 0; i < BURST_ON_MS / 100 && s_active; i++) vTaskDelay(pdMS_TO_TICKS(100));
+        esp_ble_gap_stop_advertising(); on = false;
+        for (int i = 0; i < BURST_OFF_MS / 100 && s_active; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 static void console_task(void *arg)
@@ -113,7 +151,8 @@ static void console_task(void *arg)
         case 'c': advertise('c', 0x3, true,  0x53); break; // static-random, CONNECTABLE
         case 'r': advertise('r', 0x1, false, 0x54); break; // RPA, nonconn
         case 'v': advertise('v', 0x2, false, 0x55); break; // reserved, nonconn
-        case 'x': esp_ble_gap_stop_advertising(); printf("STIM x stopped\n"); break;
+        case 'x': s_active = false; esp_ble_gap_stop_advertising();
+                  printf("STIM x stopped\n"); break;
         default: break;
         }
     }
@@ -134,9 +173,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_cb));
 
+    // Lower the advertising power: the device under test sits inches away, and a
+    // strong continuous source on the same channels desensitizes its scan.
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_N12);
+
     usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&ucfg));
 
     xTaskCreate(console_task, "stim_console", 4096, NULL, 5, NULL);
+    xTaskCreate(burst_task, "stim_burst", 4096, NULL, 5, NULL);
     ESP_LOGI(TAG, "adv-stimulus up (cmds: s n c r v x)");
 }
