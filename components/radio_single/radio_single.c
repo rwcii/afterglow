@@ -219,6 +219,18 @@ static void adv_service(const adv_req_t *req)
 
     adv_apply_power(req->tx_power_idx);
 
+#ifdef AG_ONAIR_TEST
+    // On-air test hook (compiled in only for the tools/onair-test rig, never in
+    // a normal build): emit a ground-truth line so the host harness can assert
+    // the address and power a replay slot puts on air.
+    if (req->has_addr) {
+        ESP_LOGI(TAG, "ONAIR emit addr=%02x:%02x:%02x:%02x:%02x:%02x pwr_idx=%d adlen=%u",
+                 req->addr[5], req->addr[4], req->addr[3], req->addr[2],
+                 req->addr[1], req->addr[0], (int)req->tx_power_idx,
+                 (unsigned)req->frame_len);
+    }
+#endif
+
     // Config raw AdvData, then block until the controller signals it loaded.
     xEventGroupClearBits(s_adv_evt, ADV_DATA_SET_BIT);
     esp_err_t rc = esp_ble_gap_config_adv_data_raw((uint8_t *)req->frame, req->frame_len);
