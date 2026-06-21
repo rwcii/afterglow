@@ -29,6 +29,25 @@ static uint16_t s_seen_ids[MESH_SEEN_CAP];
 static uint32_t s_seen_stamps[MESH_SEEN_CAP];
 static ag_seen_t s_seen;
 
+// Mesh service id (manufacturer-specific 0xFF AD) + protocol version.
+#define MESH_SVC_LO 0xAF
+#define MESH_SVC_HI 0x6C
+#define MESH_VERSION 0x01
+
+// Contact table: peers seen recently, with a per-peer cooldown so we don't
+// re-transfer to the same node on every HELLO.
+#define MESH_CONTACTS 8
+typedef struct { uint32_t peer_lo24; uint32_t last_xfer_ms; bool used; } mesh_contact_t;
+static mesh_contact_t s_contacts[MESH_CONTACTS];
+
+// Fragment reassembly buffer: a single in-flight record per rec_id slot.
+#define MESH_REASM 8
+typedef struct {
+    uint16_t rec_id; uint8_t frag_total; uint8_t have_mask;
+    uint8_t payload[31]; uint8_t payload_len; bool used;
+} mesh_reasm_t;
+static mesh_reasm_t s_reasm[MESH_REASM];
+
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 esp_err_t mesh_init(void)
@@ -43,17 +62,25 @@ esp_err_t mesh_init(void)
     return ESP_OK;
 }
 
-// Emit the HELLO heartbeat from a rotating static-random address. Self-identthe
-// node via the mesh service UUID + version in mfg-data; recognized by peers
-// during their normal passive scan (no SCAN_REQ).
+// Mesh frame layout, inside a manufacturer-specific (0xFF) AD structure:
+//   [len][0xFF][SVC_LO][SVC_HI][type][ ...type-specific... ]
+// type 0x01 = HELLO: [nodeid_lo24:3]
+// type 0x02 = DATA:  [ttl:1][frag_byte:1][rec_id:2][body...]  (frag_byte =
+//             frag_index<<4 | frag_total)
+#define MESH_TYPE_HELLO 0x01
+#define MESH_TYPE_DATA  0x02
+
+// Emit the HELLO heartbeat. Self-identifies the node via the mesh service id +
+// type in mfg-data; recognized by peers during their normal passive scan.
 static void emit_hello(void)
 {
-    uint8_t adv[8];
-    adv[0] = 0x07;          // AD length
+    uint8_t adv[9];
+    adv[0] = 0x08;          // AD length (bytes after this one)
     adv[1] = 0xFF;          // manufacturer-specific
-    adv[2] = 0xAF; adv[3] = 0x6C;       // mesh service id (Afterglow)
-    adv[4] = 0x01;          // protocol version
-    memcpy(&adv[5], &s_node_id, 3);     // low 24 bits of NodeID (HELLO id)
+    adv[2] = MESH_SVC_LO; adv[3] = MESH_SVC_HI;
+    adv[4] = MESH_TYPE_HELLO;
+    memcpy(&adv[5], &s_node_id, 3);     // low 24 bits of NodeID
+    adv[8] = MESH_VERSION;
     ag_emit_t e = {
         .proto = AG_PROTO_BLE, .frame = adv, .frame_len = sizeof(adv),
         .channel = 37, .tx_power_idx = 8, .interval_ms = 100,
@@ -75,22 +102,28 @@ static void transfer_to_peer(uint16_t peer_lo16)
         const ag_beacon_record_t *r = pool_record_at(i);
         if (!r || !ag_mesh_carry_eligible(r)) continue;
         if ((uint16_t)(r->origin_node & 0xFFFF) == peer_lo16) continue;
-        uint8_t frags = ag_mesh_frag_count(r->payload_len, 20);
-        // Emit each fragment as a connectionless DATA adv (transport detail:
-        // 4-bit frag_index/frag_total + the body slice; reassembled by peers).
+        // Carry TTL: a fresh air-captured record (hop_ttl 0) starts at TTL_INIT;
+        // a relayed record carries its remaining hop_ttl. ttl==0 is replay-only.
+        uint8_t carry_ttl = r->hop_ttl ? r->hop_ttl : AG_TTL_INIT;
+        const uint8_t BODY = 16;     // body bytes per fragment (fits the header)
+        uint8_t frags = ag_mesh_frag_count(r->payload_len, BODY);
         for (uint8_t f = 0; f < frags; f++) {
             uint8_t adv[31];
-            uint8_t off = (uint8_t)(f * 20);
+            uint8_t off = (uint8_t)(f * BODY);
             uint8_t body = (uint8_t)(r->payload_len - off);
-            if (body > 20) body = 20;
-            adv[0] = (uint8_t)(body + 4);
+            if (body > BODY) body = BODY;
+            // [len][0xFF][SVC_LO][SVC_HI][DATA][ttl][frag][rec_lo][rec_hi][body]
+            adv[0] = (uint8_t)(8 + body);   // bytes after the length byte
             adv[1] = 0xFF;
-            adv[2] = (uint8_t)((f << 4) | (frags & 0x0F)); // frag_index | frag_total
-            adv[3] = (uint8_t)(r->rec_id & 0xFF);
-            adv[4] = (uint8_t)(r->rec_id >> 8);
-            memcpy(&adv[5], r->payload + off, body);
+            adv[2] = MESH_SVC_LO; adv[3] = MESH_SVC_HI;
+            adv[4] = MESH_TYPE_DATA;
+            adv[5] = carry_ttl;
+            adv[6] = (uint8_t)((f << 4) | (frags & 0x0F));
+            adv[7] = (uint8_t)(r->rec_id & 0xFF);
+            adv[8] = (uint8_t)(r->rec_id >> 8);
+            memcpy(&adv[9], r->payload + off, body);
             ag_emit_t e = {
-                .proto = AG_PROTO_BLE, .frame = adv, .frame_len = (uint16_t)(body + 5),
+                .proto = AG_PROTO_BLE, .frame = adv, .frame_len = (uint16_t)(9 + body),
                 .channel = 37, .tx_power_idx = 8, .interval_ms = 100,
             };
             radio_backend_get()->emit(&e);
@@ -124,20 +157,118 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
     // REFRESH_LOWER / DROP_* require no absorption.
 }
 
+// Record a peer contact; return true if the per-peer cooldown has elapsed (so
+// the caller should transfer to it now). Evicts the stalest slot when full.
+static bool contact_seen(uint32_t peer_lo24, uint32_t t)
+{
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < MESH_CONTACTS; i++) {
+        if (s_contacts[i].used && s_contacts[i].peer_lo24 == peer_lo24) { slot = i; break; }
+        if (!s_contacts[i].used) { slot = i; break; }
+        if (s_contacts[i].last_xfer_ms < s_contacts[oldest].last_xfer_ms) oldest = i;
+    }
+    if (slot < 0) slot = oldest;
+    mesh_contact_t *c = &s_contacts[slot];
+    bool fresh = c->used && c->peer_lo24 == peer_lo24;
+    if (fresh && (t - c->last_xfer_ms) < s_cfg.mesh_contact_cooldown_ms) {
+        return false;  // still cooling down for this peer
+    }
+    c->used = true; c->peer_lo24 = peer_lo24; c->last_xfer_ms = t;
+    return true;
+}
+
+// Accept a DATA fragment; on the last missing fragment, reassemble and absorb.
+static void on_data_fragment(uint8_t ttl, uint8_t frag_byte, uint16_t rec_id,
+                             const uint8_t *body, uint8_t body_len,
+                             uint32_t origin_node)
+{
+    uint8_t frag_idx = (uint8_t)(frag_byte >> 4);
+    uint8_t frag_tot = (uint8_t)(frag_byte & 0x0F);
+    if (frag_tot == 0 || frag_idx >= frag_tot) return;
+
+    // Find or claim a reassembly slot for this rec_id.
+    int slot = -1;
+    for (int i = 0; i < MESH_REASM; i++)
+        if (s_reasm[i].used && s_reasm[i].rec_id == rec_id) { slot = i; break; }
+    if (slot < 0)
+        for (int i = 0; i < MESH_REASM; i++)
+            if (!s_reasm[i].used) { slot = i; break; }
+    if (slot < 0) slot = (int)(rec_id % MESH_REASM);   // overwrite on pressure
+    mesh_reasm_t *rb = &s_reasm[slot];
+    if (!rb->used || rb->rec_id != rec_id) {
+        memset(rb, 0, sizeof(*rb));
+        rb->used = true; rb->rec_id = rec_id; rb->frag_total = frag_tot;
+    }
+    uint8_t off = (uint8_t)(frag_idx * 16);
+    if (off + body_len <= sizeof(rb->payload)) {
+        memcpy(rb->payload + off, body, body_len);
+        if (off + body_len > rb->payload_len) rb->payload_len = (uint8_t)(off + body_len);
+    }
+    rb->have_mask |= (uint8_t)(1u << frag_idx);
+
+    // All fragments present? Reassemble into a record and gate it.
+    uint8_t full = (uint8_t)((1u << frag_tot) - 1);
+    if ((rb->have_mask & full) == full) {
+        ag_beacon_record_t rec = {0};
+        rec.proto = AG_PROTO_BLE;
+        rec.cls = AG_CLASS_TENTATIVE;
+        rec.payload_len = rb->payload_len;
+        memcpy(rec.payload, rb->payload, rb->payload_len);
+        // Reconstruct identity from the payload prefix (AdvA was the first 6 B
+        // of the captured frame; carried in the payload here).
+        memcpy(rec.orig_addr, rb->payload, 6);
+        rec.rec_id = rec_id;
+        rb->used = false;   // free the slot
+        mesh_absorb_inbound(&rec, ttl, origin_node);
+    }
+}
+
+// Inspect a captured BLE frame. If it is an Afterglow mesh frame (HELLO/DATA),
+// consume it (drive contact/transfer or reassembly) and return true so the
+// capture path does NOT admit it to the pool as an ordinary beacon.
+bool mesh_try_consume(const ag_capture_t *cap)
+{
+    if (!s_cfg.mesh_enabled || cap->proto != AG_PROTO_BLE) return false;
+    // Captured BLE frame is AdvA(6) + AdvData; the AD list starts at offset 6.
+    if (cap->frame_len < 6 + 5) return false;
+    const uint8_t *ad = cap->frame + 6;
+    uint8_t ad_len = ad[0];
+    if (cap->frame_len < (uint16_t)(6 + 1 + ad_len)) return false;
+    if (ad[1] != 0xFF || ad[2] != MESH_SVC_LO || ad[3] != MESH_SVC_HI) return false;
+
+    uint8_t type = ad[4];
+    uint32_t t = now_ms();
+    if (type == MESH_TYPE_HELLO && ad_len >= 7) {
+        uint32_t peer = (uint32_t)ad[5] | ((uint32_t)ad[6] << 8) | ((uint32_t)ad[7] << 16);
+        if (peer == (s_node_id & 0xFFFFFF)) return true;   // our own HELLO
+        if (contact_seen(peer, t)) transfer_to_peer((uint16_t)(peer & 0xFFFF));
+        return true;
+    }
+    if (type == MESH_TYPE_DATA && ad_len >= 8) {
+        uint8_t ttl = ad[5];
+        uint8_t frag_byte = ad[6];
+        uint16_t rec_id = (uint16_t)(ad[7] | (ad[8] << 8));
+        const uint8_t *body = &ad[9];
+        uint8_t body_len = (uint8_t)(ad_len - 8);
+        // origin_node is not carried on the wire (kept RAM-only); use the peer's
+        // low bits via rec_id provenance is not available, so pin to a non-self
+        // sentinel derived from rec_id (own-origin check still protects us).
+        on_data_fragment(ttl, frag_byte, rec_id, body, body_len, ~s_node_id);
+        return true;
+    }
+    return true;  // recognized mesh frame, unknown subtype — still consume it
+}
+
 void mesh_tick(void)
 {
     if (!s_cfg.mesh_enabled) return; // ships off (Group F)
     uint32_t t = now_ms();
 
-    // HELLO heartbeat ~4 s ±25%.
+    // HELLO heartbeat ~4 s ±25%. Contact/transfer and reassembly are driven by
+    // mesh_try_consume() from the capture path, not from this tick.
     uint32_t hello_gap = 3000 + (uint32_t)ag_prng_uniform(&s_rng, 0.0f, 2000.0f);
     if (t - s_last_hello_ms >= hello_gap) {
         emit_hello();
         s_last_hello_ms = t;
     }
-
-    // Contact-driven transfer is invoked by the transport on peer detection;
-    // the periodic tick only drives HELLO. transfer_to_peer() is called from
-    // the GAP scan-result handler with the peer's NodeID low-16.
-    (void)transfer_to_peer;
 }
