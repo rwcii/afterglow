@@ -48,8 +48,14 @@ static const char *TAG = "radio_single";
 // high-priority queue drained ahead of ghosts, so replay chatter can never
 // starve HELLO/DATA off the air.
 #define ADV_REQ_FRAME_MAX 31     // legacy AdvData ceiling
-#define ADV_MIN_DWELL_MS  90     // hold each frame on air past a 30 ms scan window
-#define ADV_Q_HI_DEPTH    8      // mesh HELLO/DATA: guaranteed slots
+#define ADV_MIN_DWELL_MS  90     // floor: hold each frame on air past a 30 ms scan window
+#define ADV_DWELL_INTERVALS 4    // dwell >= this many adv intervals, so a frame is
+                                 // actually broadcast several times (across all 3
+                                 // channels) and overlaps multiple peer scan windows
+#define ADV_MAX_DWELL_MS  400    // cap so one slow request can't hog the instance
+#define ADV_Q_HI_DEPTH    40     // mesh: a full transfer is up to 16 records x ~2
+                                 // frags, optionally repeated — size so a burst fits
+                                 // without dropping fragments
 #define ADV_Q_LO_DEPTH    8      // replay ghosts: best-effort, drop when full
 #define ADV_DATA_SET_BIT  BIT0   // event-group bit: raw AdvData config completed
 
@@ -169,7 +175,14 @@ static void adv_service(const adv_req_t *req)
         ESP_LOGW(TAG, "adv start failed: %d", (int)rc);
         return;
     }
-    vTaskDelay(pdMS_TO_TICKS(ADV_MIN_DWELL_MS)); // guaranteed time on air
+    // Hold long enough for the frame to actually broadcast several times: a dwell
+    // shorter than the adv interval can stop the instance before a single TX
+    // fires. Dwell across ADV_DWELL_INTERVALS intervals (floored/capped) so each
+    // frame is repeated on all 3 channels and spans multiple peer scan windows.
+    uint32_t dwell = req->interval_ms * ADV_DWELL_INTERVALS;
+    if (dwell < ADV_MIN_DWELL_MS) dwell = ADV_MIN_DWELL_MS;
+    if (dwell > ADV_MAX_DWELL_MS) dwell = ADV_MAX_DWELL_MS;
+    vTaskDelay(pdMS_TO_TICKS(dwell));
     esp_ble_gap_stop_advertising();
 }
 
@@ -325,10 +338,11 @@ static esp_err_t rs_emit(const ag_emit_t *e)
         };
         memcpy(req.frame, e->frame, e->frame_len);
         QueueHandle_t q = e->priority ? s_adv_q_hi : s_adv_q_lo;
-        // Block briefly on the priority queue (mesh frames are worth a short
-        // wait); never block on ghosts — a full ghost queue just drops the frame.
-        TickType_t wait = e->priority ? pdMS_TO_TICKS(20) : 0;
-        if (xQueueSend(q, &req, wait) != pdTRUE) {
+        // Always non-blocking. Mesh transfer enqueues a whole burst from the GAP
+        // callback context, so blocking here would stall the scan/capture path;
+        // the hi queue is sized to hold a full repeated burst, and a drop on a
+        // full queue is acceptable for unacked gossip.
+        if (xQueueSend(q, &req, 0) != pdTRUE) {
             if (e->priority) ESP_LOGW(TAG, "mesh adv queue full, dropped");
             return ESP_ERR_NO_MEM;
         }

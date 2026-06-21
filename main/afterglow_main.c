@@ -4,9 +4,9 @@
 // backend serializes capture and replay through one time-division
 // scheduler; on a dual-radio backend these run concurrently.
 //
-// Build order maps to phases: P1 capture, P2 replay, P3 pool+lifecycle
-// P4 mesh. Phases that are not yet validated ship disabled by default
-// (replay.wifi_beacons_enabled=false, mesh.enabled=false — ).
+// Build order maps to phases: P1 capture, P2 replay, P3 pool+lifecycle,
+// P4 mesh. Optional phases default off in config and are enabled per
+// deployment (replay.wifi_beacons_enabled, mesh.enabled).
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -68,7 +68,7 @@ void app_main(void)
     ESP_ERROR_CHECK(replay_init());
     ESP_ERROR_CHECK(lifecycle_init());
 
-    // P4: mesh (disabled by default until validated).
+    // P4: mesh (optional; enabled via config).
     if (s_cfg.mesh_enabled) {
         ESP_ERROR_CHECK(mesh_init());
     }
