@@ -13,4 +13,7 @@ idf_component_register(
         lifecycle
         mesh
         entropy
+        esp_netif
+        esp_event
+        nvs_flash
 )
