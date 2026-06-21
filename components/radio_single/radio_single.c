@@ -94,17 +94,23 @@ static void scheduler_task(void *arg)
     // settle before the first scan window.
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    // BLE scanning runs continuously; the controller interleaves it with any
+    // active advertising (mesh HELLO / replay) on its own. Wi-Fi sniffing is the
+    // segment that must be mutually exclusive with BLE, so the scheduler stops
+    // scanning only for the Wi-Fi dwell, then resumes.
+    esp_ble_gap_start_scanning(0);
     while (s_capturing) {
-        // BLE scan segment.
-        esp_ble_gap_start_scanning(0); // 0 = until stopped
-        vTaskDelay(pdMS_TO_TICKS(100));
-        esp_ble_gap_stop_scanning();
+        // Longer BLE scan window so adv bursts from peers reliably overlap it.
+        vTaskDelay(pdMS_TO_TICKS(300));
 
-        // Wi-Fi sniff segment: hop to the next channel, dwell.
+        // Wi-Fi sniff segment: pause BLE, hop channel, dwell, resume BLE.
+        esp_ble_gap_stop_scanning();
         s_wifi_ch_idx = (uint8_t)((s_wifi_ch_idx + 1) % 3);
         esp_wifi_set_channel(s_wifi_channels[s_wifi_ch_idx], WIFI_SECOND_CHAN_NONE);
-        vTaskDelay(pdMS_TO_TICKS(150));
+        vTaskDelay(pdMS_TO_TICKS(120));
+        esp_ble_gap_start_scanning(0);
     }
+    esp_ble_gap_stop_scanning();
     s_sched_task = NULL;
     vTaskDelete(NULL);
 }
@@ -209,7 +215,7 @@ static esp_err_t rs_emit(const ag_emit_t *e)
         static esp_ble_adv_params_t adv = {
             .adv_int_min = 0xA0, .adv_int_max = 0xC0,
             .adv_type = ADV_TYPE_NONCONN_IND,
-            .own_addr_type = BLE_ADDR_TYPE_RANDOM,
+            .own_addr_type = BLE_ADDR_TYPE_PUBLIC,  // no random-addr registration needed
             .channel_map = ADV_CHNL_ALL,
             .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
         };
@@ -217,8 +223,9 @@ static esp_err_t rs_emit(const ag_emit_t *e)
         uint16_t unit = (uint16_t)((e->interval_ms * 8) / 5);
         adv.adv_int_min = unit;
         adv.adv_int_max = (uint16_t)(unit + (unit / 32 ? unit / 32 : 1)); // never equal
-        esp_ble_gap_config_adv_data_raw((uint8_t *)e->frame, e->frame_len);
-        esp_ble_gap_start_advertising(&adv);
+        esp_err_t r1 = esp_ble_gap_config_adv_data_raw((uint8_t *)e->frame, e->frame_len);
+        esp_err_t r2 = esp_ble_gap_start_advertising(&adv);
+        if (r1 || r2) ESP_LOGW(TAG, "adv emit: cfg=%d start=%d", (int)r1, (int)r2);
         return ESP_OK;
     }
 
