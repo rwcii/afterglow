@@ -10,8 +10,10 @@ emergent, leaderless privacy mesh. The aggregate effect: a passive observer can
 no longer reliably conclude that the presence of an identifier means the
 corresponding device is physically there.
 
-> **Status:** scaffolding. Design is complete and grounded against verified
-> ESP32-S3 capabilities; implementation proceeds bottom-up by phase (see below).
+> **Status:** P1–P4 implemented and building clean for the ESP32-S3 (ESP-IDF
+> v5.3.x). Host unit/statistical tests pass in CI; on-hardware flash and
+> operational testing are in progress. Wi-Fi beacon replay and the mesh ship
+> **disabled by default** pending field validation.
 
 ## Intended use & boundaries
 
@@ -44,7 +46,8 @@ running it:
 
 ## Build & flash
 
-Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) (v5.x).
+Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) **v5.3.x**
+(the version the firmware is built and CI-verified against).
 
 ```sh
 idf.py set-target esp32s3
@@ -52,13 +55,22 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-`sdkconfig.defaults` pins the project-relevant options (PSRAM, Bluedroid,
-coexistence, 8 MB flash). The generated `sdkconfig` is gitignored.
+`sdkconfig.defaults` pins the project-relevant options (PSRAM, Bluedroid with
+BLE 4.2 legacy advertising, Wi-Fi/BLE coexistence, 8 MB flash). The generated
+`sdkconfig` is gitignored.
+
+Host-native unit and statistical tests run without ESP-IDF:
+
+```sh
+cmake -S test/host -B build/host -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/host -j
+ctest --test-dir build/host --output-on-failure
+```
 
 ## Architecture
 
-The firmware is organized as ESP-IDF components, one per module. Build order is
-bottom-up so the design is informed by what is actually observed in the field:
+The firmware is organized as ESP-IDF components, one per module, grouped by the
+phase that introduced them:
 
 | Phase | Focus | Key components |
 |---|---|---|
@@ -69,6 +81,12 @@ bottom-up so the design is informed by what is actually observed in the field:
 
 Cross-cutting: `config` (NVS-backed tunables, conservative defaults) and
 `entropy` (RNG + slow runtime drift of boot constants).
+
+Each component is split into **portable logic** (`*_logic.c`, compiled and
+tested host-native against thin ESP-IDF shims under `test/host/shim/`) and a
+thin **hardware wrapper** that supplies the clock, RNG, and radio. The
+`afterglow_core` component is fully portable and carries no ESP-IDF
+dependencies.
 
 A primary design constraint is that the firmware must **not introduce its own
 fingerprint** — any predictable artifact (fixed replay window, altered interval,
@@ -81,6 +99,7 @@ in the relay behavior.
 
 ## Contributing
 
-Contributions welcome once the P1 capture foundation lands. Please keep the
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch flow (`feature/*` →
+`develop` → `main`), local checks, and commit conventions. Please keep the
 hardware-agnostic abstractions (the radio HAL) clean so the firmware can be
 ported beyond the XIAO, and respect the intended-use boundaries above.
