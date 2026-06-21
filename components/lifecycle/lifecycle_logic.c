@@ -21,9 +21,6 @@
 #define AG_LIFE_ROTATE_MAX_MS    (60u * 60u * 1000u)
 #endif
 #define AG_LIFE_ROTATE_SIGMA     0.55f
-// post-departure grace window bounds (ms): [2,12] minutes.
-#define AG_LIFE_GRACE_MIN_MS (2u * 60u * 1000u)
-#define AG_LIFE_GRACE_MAX_MS (12u * 60u * 1000u)
 // own-device strong-signal floor (dBm).
 #define AG_LIFE_OWN_RSSI_MIN_DBM (-45)
 // fade factor applied to p_virt on the departing transition.
@@ -66,29 +63,22 @@ bool ag_life_departed(const ag_beacon_record_t *r, uint32_t now_ms,
 }
 
 ag_life_action_t ag_life_tick_record(ag_beacon_record_t *r, uint32_t now_ms,
-                                     uint8_t depart_gap_mult, ag_prng_t *rng)
+                                     uint8_t depart_gap_mult)
 {
+    // Presence gate ONLY: departure marks "the source is currently absent" so the
+    // ghost may stand in for it; it is NOT end-of-life. Lineage lifetime is owned
+    // solely by the eviction TTL (age from first_seen). Re-observation clears
+    // AG_FLAG_DEPARTING in pool admission, so the gate is edge-correct both ways.
     if (!ag_life_departed(r, now_ms, depart_gap_mult)) {
         return AG_LIFE_NONE;
     }
-
-    uint32_t silent = (now_ms >= r->last_seen_ms) ? (now_ms - r->last_seen_ms) : 0u;
-
     if (!(r->flags & AG_FLAG_DEPARTING)) {
         // first tick past the gap: mark departing and fade toward center.
         r->flags |= AG_FLAG_DEPARTING;
         r->p_virt = r->p_center + (r->p_virt - r->p_center) * AG_LIFE_FADE;
         return AG_LIFE_DEPARTING;
     }
-
-    // already departing: retire once silence exceeds gap + a drawn grace window.
-    float grace = ag_prng_uniform(rng, (float)AG_LIFE_GRACE_MIN_MS,
-                                  (float)AG_LIFE_GRACE_MAX_MS);
-    uint32_t expire_at = depart_gap_ms(r, depart_gap_mult) + (uint32_t)grace;
-    if (silent > expire_at) {
-        return AG_LIFE_EXPIRE;
-    }
-    return AG_LIFE_NONE;
+    return AG_LIFE_NONE;  // already departing: hold until the TTL eviction sweep
 }
 
 void ag_life_make_successor(const ag_beacon_record_t *parent,
@@ -144,7 +134,7 @@ ag_life_rotation_mode_t ag_life_rotation_mode(uint8_t cls)
     // Static-random / public / Wi-Fi hold a single address for life (correct for
     // iBeacon/Eddystone/APs, which do not rotate; making them rotate would be
     // unrealistic for those device classes).
-    // Captured RPA (0b01) is never cloned at all (eligibility gate / artifact G),
+    // Captured RPA (0b01) is never cloned at all (refused by the eligibility gate),
     // so it never reaches here as a replayable ghost.
     return (cls == AG_CLASS_NRPA_BLE) ? AG_LIFE_ROTATING : AG_LIFE_STATIONARY_HOLD;
 }

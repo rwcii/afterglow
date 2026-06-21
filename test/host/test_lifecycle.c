@@ -76,24 +76,27 @@ int main(void)
     float p_before = t.p_virt;
 
     // present: no change.
-    CHECK(ag_life_tick_record(&t, 10000 + 1000, GAP_MULT, &rng) == AG_LIFE_NONE);
+    CHECK(ag_life_tick_record(&t, 10000 + 1000, GAP_MULT) == AG_LIFE_NONE);
     CHECK(!(t.flags & AG_FLAG_DEPARTING));
     CHECK(t.p_virt == p_before);
 
     // crossed the gap: flagged + faded toward center.
-    ag_life_action_t a = ag_life_tick_record(&t, 10000 + 6000, GAP_MULT, &rng);
+    ag_life_action_t a = ag_life_tick_record(&t, 10000 + 6000, GAP_MULT);
     CHECK_MSG(a == AG_LIFE_DEPARTING, "expected DEPARTING, got %d", (int)a);
     CHECK(t.flags & AG_FLAG_DEPARTING);
     CHECK_MSG(t.p_virt < p_before, "p_virt did not fade: %g", (double)t.p_virt);
 
-    // still inside the post-departure grace window (gap+1s < gap+2min): NONE.
-    CHECK(ag_life_tick_record(&t, 10000 + 5000 + 1000, GAP_MULT, &rng)
-          == AG_LIFE_NONE);
+    // already departing: presence gate only — the record is HELD (NONE), never
+    // retired here. Lineage lifetime is the eviction TTL's job, not departure's.
+    CHECK(ag_life_tick_record(&t, 10000 + 6000 + 1000, GAP_MULT) == AG_LIFE_NONE);
+    CHECK(t.flags & AG_FLAG_DEPARTING);   // flag persists
+    float p_departing = t.p_virt;
 
-    // well past gap + max grace (12 min = 720000 ms): EXPIRE.
-    uint32_t far = 10000 + 5000 + 720000u + 1000;
-    CHECK_MSG(ag_life_tick_record(&t, far, GAP_MULT, &rng) == AG_LIFE_EXPIRE,
-              "expected EXPIRE past grace window");
+    // even arbitrarily far past the gap: still NONE (no grace/expire path).
+    uint32_t far = 10000 + 6000 + 3600000u;  // +1 hour
+    CHECK_MSG(ag_life_tick_record(&t, far, GAP_MULT) == AG_LIFE_NONE,
+              "departure must not retire a record (TTL owns lifetime)");
+    CHECK(t.p_virt == p_departing);       // fade applied once, not repeatedly
 
     // --- rotation successor ----------------------------------------------
     ag_beacon_record_t parent = mk_rec();
@@ -154,7 +157,7 @@ int main(void)
                   s, cs.orig_addr[0]);
     }
 
-    // --- rotation mode (§A6.3) -------------------------------------------
+    // --- rotation mode ---------------------------------------------------
     // Only the NRPA class rotates; everything cloneable else holds.
     CHECK(ag_life_rotation_mode(AG_CLASS_NRPA_BLE) == AG_LIFE_ROTATING);
     CHECK(ag_life_rotation_mode(AG_CLASS_STATIC_RANDOM_BLE) == AG_LIFE_STATIONARY_HOLD);

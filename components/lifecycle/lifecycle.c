@@ -52,9 +52,9 @@ void lifecycle_tick(void)
         // lifetime is governed solely by the eviction sweep's per-record TTL
         // (age from first_seen), so departure no longer clears eligibility or
         // retires the record here.
-        ag_life_tick_record(r, t, s_cfg.depart_gap_mult, &s_rng);
+        ag_life_tick_record(r, t, s_cfg.depart_gap_mult);
 
-        // Address rotation (§A6.3) — independent of presence and TTL. A ROTATING
+        // Address rotation — independent of presence and TTL. A ROTATING
         // (NRPA-class) ghost swaps to a fresh NRPA address on its per-ghost timer
         // and keeps doing so until the lineage's TTL completes (the successor
         // inherits first_seen/base_ttl, so eviction still kills the lineage). The

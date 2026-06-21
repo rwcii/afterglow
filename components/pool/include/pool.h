@@ -52,7 +52,7 @@ typedef struct {
     uint32_t replay_deadline_ms;
     uint32_t next_rotate_ms;    // absolute ms of the next address rotation for a
                                 // ROTATING (NRPA-class) ghost; 0 = unscheduled /
-                                // STATIONARY_HOLD. Lifecycle-owned (see §A6.3).
+                                // STATIONARY_HOLD. Lifecycle-owned.
     float    p_virt, p_center;  // RSSI walk state
     uint8_t  payload_len;
     uint8_t  payload[31];       // BLE <=31 B; Wi-Fi beacon templates are truncated to fit (Wi-Fi replay ships off)
