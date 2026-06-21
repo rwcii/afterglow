@@ -55,6 +55,10 @@ typedef struct {
     uint32_t spawn_jitter_ms_max;   // 60000
     bool     wifi_beacons_enabled;  // FALSE (pending E3/IDF gate)
     bool     ble_enabled;           // true
+    bool     require_broadcast_only;// TRUE — relay only non-connectable,
+                                    // non-scannable advertisements
+    bool     require_beacon_payload;// TRUE — additionally require a recognized
+                                    // broadcast-beacon payload before relay
     ag_fast_policy_t fast_cadence_policy; // SLOW_AND_FLAG
 
     // Group E — TX entropy (E)

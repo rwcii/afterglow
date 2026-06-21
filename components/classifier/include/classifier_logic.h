@@ -30,7 +30,11 @@ typedef enum {
 // Update classification state for a record on a new sighting. Reads proto,
 // addr_type, orig_addr, payload, obs_count and adv_kind; may promote rec->cls
 // and set/clear AG_FLAG_REPLAY_ELIGIBLE. Idempotent for a given record state.
-void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings);
+// When require_beacon_payload is true (the default posture), random-BLE
+// promotion additionally requires a recognized broadcast-beacon payload; when
+// false the subtype + persistence alone suffice (payload requirement relaxed).
+void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings,
+                         bool require_beacon_payload);
 
 // Map a pool class (ag_beacon_class_t) to the eligibility-gate class used by
 // ag_replay_eligible().

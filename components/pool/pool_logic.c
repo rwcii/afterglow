@@ -1,5 +1,6 @@
 // pool_logic.c — portable pool record helpers (host-tested in test_pool.c).
 #include "pool_logic.h"
+#include "ag_core/ag_eligible.h" // ag_adv_kind_merge — stickiest-unsafe-wins
 #include <string.h>
 
 uint16_t ag_pool_rec_id(uint8_t addr_type, const uint8_t orig_addr[6],
@@ -66,6 +67,11 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
         }
         r->last_seen_ms = now_ms;
         r->channel = cap->channel;
+        // Stickiest-unsafe-wins: a source that EVER advertised connectably or
+        // scannably under this identity stays that kind forever, so a later
+        // broadcast-only sighting can't relax it back into eligibility.
+        r->adv_kind = (uint8_t)ag_adv_kind_merge((ag_adv_kind_t)r->adv_kind,
+                                                 cap->adv_kind);
         r->flags = (uint8_t)(r->flags & ~AG_FLAG_DEPARTING);  // it's back
         return idx;
     }
@@ -76,6 +82,10 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     memset(r, 0, sizeof(*r));
     r->proto = (uint8_t)cap->proto;
     r->cls = AG_CLASS_TENTATIVE;
+    // Record the observed PDU behavior as-is. memset above zeroed it to
+    // NONCONN_NONSCAN, which would be a fail-OPEN default, so set it explicitly
+    // from the capture (AG_ADV_UNKNOWN when the backend couldn't parse it).
+    r->adv_kind = (uint8_t)cap->adv_kind;
     memcpy(r->orig_addr, orig_addr, 6);
     r->addr_type = addr_type;
     r->payload_len = plen;
