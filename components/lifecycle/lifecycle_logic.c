@@ -87,6 +87,13 @@ void ag_life_make_successor(const ag_beacon_record_t *parent,
     x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
     x ^= (x >> 31);
     for (int i = 0; i < 6; i++) child->orig_addr[i] = (uint8_t)(x >> (8 * i));
+    // A rotation successor is always a Non-Resolvable Private Address: force the
+    // subtype bits (top two of the MSB, orig_addr[0]) to 0b00. Without this the
+    // avalanche can land on 0b01 (RPA — uncloneable, the eligibility gate forbids
+    // it) or 0b10 (reserved — the controller rejects set_rand_addr). Only NRPAs
+    // legitimately rotate, so a rotating ghost of any cloneable source ages out
+    // into the NRPA class. (See classifier_logic.c: subtype is read from [0].)
+    child->orig_addr[0] = (uint8_t)(child->orig_addr[0] & 0x3F);
 
     // payload copied verbatim (template continuity across the rotation).
     memcpy(child->payload, parent->payload, sizeof(child->payload));
@@ -98,8 +105,15 @@ void ag_life_make_successor(const ag_beacon_record_t *parent,
     child->rssi_ewma = parent->rssi_ewma;
     child->rssi_last = parent->rssi_last;
 
-    // fresh presence: a newborn record, not yet flagged, id recomputed upstream.
-    child->first_seen_ms = now_ms;
+    // INHERIT the lineage TTL basis: first_seen_ms / base_ttl_s / ttl_cap_s /
+    // replay_deadline_ms carry over from the parent (already copied by the
+    // struct assignment above; first_seen_ms is deliberately NOT reset). Eviction
+    // measures age from first_seen against base_ttl_s, so a lineage must age from
+    // the ORIGINAL device's first sighting — otherwise each rotation restarts the
+    // age clock and the lineage lives forever. The whole rotating lineage now dies
+    // when the original's TTL completes, regardless of how many times it rotated.
+    (void)now_ms;  // successor age is the parent's, not "now"
+    // fresh presence for the new address only: just-observed, not yet flagged.
     child->last_seen_ms = now_ms;
     child->obs_count = 1;
     child->flags = (uint8_t)(parent->flags & ~AG_FLAG_DEPARTING);

@@ -100,6 +100,10 @@ int main(void)
     parent.rssi_ewma = -52;
     parent.p_virt = -3.5f;
     parent.p_center = -2.0f;
+    parent.first_seen_ms = 30000u;   // original device first seen at t=30s
+    parent.base_ttl_s = 600.0f;      // lineage TTL basis
+    parent.ttl_cap_s = 900.0f;
+    parent.replay_deadline_ms = 123456u;
     ag_beacon_record_t child;
     ag_life_make_successor(&parent, &child, 0x12345678u, 99000u);
 
@@ -115,15 +119,40 @@ int main(void)
     // address differs (new identity), presence reset, not departing, id cleared.
     CHECK_MSG(memcmp(child.orig_addr, parent.orig_addr, 6) != 0,
               "successor reused the parent address");
-    CHECK(child.first_seen_ms == 99000u && child.last_seen_ms == 99000u);
     CHECK(child.obs_count == 1);
     CHECK(!(child.flags & AG_FLAG_DEPARTING));
     CHECK(child.rec_id == 0);
 
-    // distinct seeds yield distinct addresses (deterministic from seed).
+    // last_seen tracks the new sighting; first_seen does NOT — the lineage ages
+    // from the original device's first sighting so the TTL deadline is shared.
+    CHECK(child.last_seen_ms == 99000u);
+    CHECK_MSG(child.first_seen_ms == parent.first_seen_ms,
+              "successor reset the lineage age clock (first_seen_ms=%u, want %u)",
+              child.first_seen_ms, parent.first_seen_ms);
+    CHECK_MSG(child.base_ttl_s == parent.base_ttl_s &&
+              child.ttl_cap_s == parent.ttl_cap_s &&
+              child.replay_deadline_ms == parent.replay_deadline_ms,
+              "successor did not inherit the lineage TTL basis");
+
+    // successor address is a Non-Resolvable Private Address: subtype bits (top two
+    // of the MSB) are 0b00 — never 0b01 (RPA) or 0b10 (reserved).
+    CHECK_MSG((child.orig_addr[0] & 0xC0) == 0x00,
+              "successor address is not NRPA-class (msb=0x%02x)", child.orig_addr[0]);
+
+    // distinct seeds yield distinct, still-NRPA addresses (deterministic).
     ag_beacon_record_t c2;
     ag_life_make_successor(&parent, &c2, 0x12345679u, 99000u);
     CHECK(memcmp(c2.orig_addr, child.orig_addr, 6) != 0);
+    CHECK((c2.orig_addr[0] & 0xC0) == 0x00);
+
+    // every seed yields an NRPA: sweep a range of seeds and check the subtype bits.
+    for (uint32_t s = 1; s <= 256; s++) {
+        ag_beacon_record_t cs;
+        ag_life_make_successor(&parent, &cs, s * 2654435761u, 99000u);
+        CHECK_MSG((cs.orig_addr[0] & 0xC0) == 0x00,
+                  "seed %u produced a non-NRPA successor (msb=0x%02x)",
+                  s, cs.orig_addr[0]);
+    }
 
     TEST_SUMMARY();
 }
