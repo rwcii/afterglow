@@ -34,6 +34,14 @@ static ag_seen_t s_seen;
 #define MESH_SVC_HI 0x6C
 #define MESH_VERSION 0x01
 
+// Connectionless transfer reliability: each DATA fragment is enqueued this many
+// times (the transport is unacked and a record absorbs only if every fragment
+// lands). The arbiter already broadcasts each enqueued frame several times
+// within its dwell (across all 3 channels), so a small repeat count adds
+// temporal diversity across the peer's scan windows without flooding the serial
+// adv queue — over-repeating just overflows it and sheds the tail fragments.
+#define MESH_FRAG_REPEAT 2
+
 // Contact table: peers seen recently, with a per-peer cooldown so we don't
 // re-transfer to the same node on every HELLO.
 #define MESH_CONTACTS 8
@@ -122,11 +130,20 @@ static void transfer_to_peer(uint16_t peer_lo16)
             adv[7] = (uint8_t)(r->rec_id & 0xFF);
             adv[8] = (uint8_t)(r->rec_id >> 8);
             memcpy(&adv[9], r->payload + off, body);
+            // Connectionless DATA is unacknowledged and a record absorbs only if
+            // ALL its fragments land, so loss of any one fragment loses the whole
+            // record. Enqueue each fragment MESH_FRAG_REPEAT times: the arbiter
+            // gives each a short-interval, multi-broadcast dwell, and the repeats
+            // spread it across distinct (and the peer's Wi-Fi-interrupted) scan
+            // windows. interval_ms=30 → the arbiter broadcasts ~4x per dwell on
+            // all 3 adv channels.
             ag_emit_t e = {
                 .proto = AG_PROTO_BLE, .frame = adv, .frame_len = (uint16_t)(9 + body),
-                .channel = 37, .tx_power_idx = 8, .interval_ms = 100, .priority = true,
+                .channel = 37, .tx_power_idx = 8, .interval_ms = 30, .priority = true,
             };
-            radio_backend_get()->emit(&e);
+            for (uint8_t rep = 0; rep < MESH_FRAG_REPEAT; rep++) {
+                radio_backend_get()->emit(&e);
+            }
         }
         sent++;
     }
