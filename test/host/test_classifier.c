@@ -89,6 +89,18 @@ int main(void)
         CHECK(!ag_classify_class_reproducible(r.cls));
     }
 
+    // --- (3b) reserved subtype (0b10): not a settable random address type, so
+    //          it must stay TENTATIVE and never become reproducible/eligible.
+    {
+        ag_beacon_record_t r = mk_ble(0x80, AG_ADV_NONCONN_NONSCAN, // 0b10 reserved
+                                      BEACON_AD, sizeof BEACON_AD);
+        observe_n(&r, 10);
+        CHECK_MSG(r.cls == AG_CLASS_TENTATIVE,
+                  "reserved subtype must not promote (cls=%u)", r.cls);
+        CHECK_MSG(!eligible(&r), "reserved subtype must never be replay-eligible");
+        CHECK(!ag_classify_class_reproducible(r.cls));
+    }
+
     // --- (4) PUBLIC: classed immediately, never eligible.
     {
         ag_beacon_record_t r = mk_ble(0x00, AG_ADV_NONCONN_NONSCAN,

@@ -98,14 +98,21 @@ void ag_classify_observe(ag_beacon_record_t *rec, uint8_t min_sightings,
             // any one address stays low. Keep RPA regardless of obs_count.
             rec->cls = AG_CLASS_RPA_BLE;
         } else if (sub == AG_RANDSUB_NRPA) {
-            // Non-resolvable: promote to NRPA only once persistent + payload_ok.
+            // Non-resolvable (0b00): promote to NRPA only once persistent +
+            // payload_ok. Re-emittable: the controller accepts a 0b00 address.
             if (stable && payload_ok) rec->cls = AG_CLASS_NRPA_BLE;
             else if (rec->cls != AG_CLASS_NRPA_BLE) rec->cls = AG_CLASS_TENTATIVE;
-        } else {
-            // Static-random (0b11) or reserved: promote to static-random once a
-            // persistent address with a satisfied payload requirement is confirmed.
+        } else if (sub == AG_RANDSUB_STATIC) {
+            // Static-random (0b11): promote once a persistent address with a
+            // satisfied payload requirement is confirmed. Re-emittable: the
+            // controller accepts a 0b11 address.
             if (stable && payload_ok) rec->cls = AG_CLASS_STATIC_RANDOM_BLE;
             else if (rec->cls != AG_CLASS_STATIC_RANDOM_BLE) rec->cls = AG_CLASS_TENTATIVE;
+        } else {
+            // Reserved (0b10): not a valid settable random address type, so it
+            // can never be re-emitted as a matching address. Leave it
+            // unpromoted (TENTATIVE) so the reproducibility gate excludes it.
+            rec->cls = AG_CLASS_TENTATIVE;
         }
     }
 
