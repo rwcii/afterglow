@@ -32,13 +32,14 @@
 // and the classifier's payload framing (offset 6) both see what they expect.
 static const uint8_t BEACON_AD[] = { 0x05, 0xFF, 0x4C, 0x00, 0x02, 0x15 };
 
-// Build a BLE capture: AdvA (msb in byte 5 sets the random subtype) || BEACON_AD,
-// with the observed PDU behavior the backend would have read off the wire.
+// Build a BLE capture: AdvA (msb in byte 0 sets the random subtype) || BEACON_AD,
+// with the observed PDU behavior the backend would have read off the wire. AdvA
+// is MSB-first (esp_bd_addr_t order), so the subtype octet is frame_out[0].
 static ag_capture_t mk_ble_cap(uint8_t msb, ag_adv_kind_t kind, int8_t rssi,
                                uint64_t ts_us, uint8_t *frame_out)
 {
-    frame_out[0] = 0x11; frame_out[1] = 0x22; frame_out[2] = 0x33;
-    frame_out[3] = 0x44; frame_out[4] = 0x55; frame_out[5] = msb;
+    frame_out[0] = msb;  frame_out[1] = 0x22; frame_out[2] = 0x33;
+    frame_out[3] = 0x44; frame_out[4] = 0x55; frame_out[5] = 0x11;
     memcpy(frame_out + 6, BEACON_AD, sizeof BEACON_AD);
 
     ag_capture_t c = {0};

@@ -116,11 +116,12 @@ int main(void)
     //     recognized beacon payload stays TENTATIVE under the default (true),
     //     but promotes (and becomes eligible) once the requirement is relaxed.
     {
-        // AdvA with static-random subtype (top two bits of byte 5 = 0b11),
-        // followed by a non-beacon AD field (0x09 = complete local name) so the
-        // beacon-payload heuristic does NOT recognize it.
+        // AdvA with static-random subtype (top two bits of byte 0 = 0b11; AdvA is
+        // MSB-first / esp_bd_addr_t order), followed by a non-beacon AD field
+        // (0x09 = complete local name) so the beacon-payload heuristic does NOT
+        // recognize it.
         uint8_t payload[12] = {0};
-        payload[5] = 0xC0;                 // static-random subtype bits
+        payload[0] = 0xC0;                 // static-random subtype bits (MSB)
         payload[6] = 0x03; payload[7] = 0x09; payload[8] = 'a'; payload[9] = 'b';
         ag_beacon_record_t rec = {0};
         rec.proto = AG_PROTO_BLE;
