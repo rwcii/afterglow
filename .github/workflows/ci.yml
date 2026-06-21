@@ -5,6 +5,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
 
 jobs:
   # Fast, runs on every push: the privacy-critical math, host-native.
@@ -34,13 +35,28 @@ jobs:
           idf.py set-target esp32s3
           idf.py build
 
-  # On-target Unity suite under QEMU. esp32s3 QEMU support varies by IDF/QEMU
-  # build, so this job is allowed to fail without blocking the merge until the
-  # QEMU target is confirmed green; flip continue-on-error off once validated.
-  target-tests:
+  # On-target Unity app build. Compiles the hardware-coupled test app for
+  # esp32s3 (BT + Wi-Fi + PSRAM + Unity) so the target paths are link-verified
+  # in CI. This is a required, blocking gate.
+  target-build:
     runs-on: ubuntu-latest
     container: espressif/idf:release-v5.3
-    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build target test app (esp32s3)
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C test/target set-target esp32s3 build
+
+  # Running the Unity suite under QEMU. esp32s3 QEMU support is not yet confirmed
+  # in CI, so this runs on demand (manual dispatch) rather than gating every PR;
+  # the suite runs for real on hardware. Promote to a required check once the
+  # esp32s3 QEMU path is validated.
+  target-qemu:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.3
     steps:
       - uses: actions/checkout@v4
       - name: Install test harness
