@@ -40,7 +40,7 @@ typedef struct {
     uint8_t  flags;
     uint8_t  orig_addr[6];      // original observed AdvA/BSSID (feeds rec_id, NOT replay addr)
     uint8_t  addr_type;         // observed (informational)
-    uint16_t rec_id;            // hash(addr_type||orig_addr||payload) — stable across relays
+    uint16_t rec_id;            // stable per-record id (hash of addr_type||orig_addr||first payload); fixed across merges/relays
     uint32_t origin_node;       // full 32-bit NodeID of first air-capturer
     uint16_t interval_q;        // estimated cadence (0.625 ms / TU units)
     int8_t   rssi_last, rssi_ewma;

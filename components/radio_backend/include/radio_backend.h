@@ -46,6 +46,10 @@ typedef struct {
     uint8_t    channel;
     int8_t     tx_power_idx;  // normalized; see radio_backend_tx_power_levels
     uint32_t   interval_ms;   // target advertising/beacon interval
+    // High-priority emissions (mesh HELLO/DATA) get guaranteed adv slots ahead
+    // of replay ghosts, so chatter can't starve them off the air. Replay leaves
+    // this 0 (default); mesh sets it true.
+    bool       priority;
 } ag_emit_t;
 
 // The backend interface. Implementations populate this vtable.
