@@ -108,18 +108,20 @@ void app_main(void)
             }
             ESP_LOGI(TAG, "ONAIR census pool=%u elig=%u dep=%u replayable=%u",
                      pc, elig, dep, repl);
-            // Report the lifecycle state of any test-stimulus record (its address
-            // body is 22:33:44:55 in orig_addr[1..4]) so the harness can see it
-            // captured, promoted, and departed.
+            // Report the lifecycle state of any test-stimulus record so the
+            // harness can see it captured, promoted, and departed. orig_addr holds
+            // the AdvA as the backend surfaces it: esp_bd_addr_t / MSB-first, so
+            // the stimulus body 22:33:44:55 lands in orig_addr[1..4] in that order
+            // and orig_addr[0] is the subtype octet (matching the STIM log format).
             for (uint16_t i = 0; i < pc; i++) {
                 const ag_beacon_record_t *r = pool_record_at(i);
                 if (!r) continue;
-                if (r->orig_addr[1] == 0x55 && r->orig_addr[2] == 0x44 &&
-                    r->orig_addr[3] == 0x33 && r->orig_addr[4] == 0x22) {
+                if (r->orig_addr[1] == 0x22 && r->orig_addr[2] == 0x33 &&
+                    r->orig_addr[3] == 0x44 && r->orig_addr[4] == 0x55) {
                     ESP_LOGI(TAG, "ONAIR stim addr=%02x:%02x:%02x:%02x:%02x:%02x "
                              "cls=%u obs=%u elig=%d dep=%d repl=%d",
-                             r->orig_addr[5], r->orig_addr[4], r->orig_addr[3],
-                             r->orig_addr[2], r->orig_addr[1], r->orig_addr[0],
+                             r->orig_addr[0], r->orig_addr[1], r->orig_addr[2],
+                             r->orig_addr[3], r->orig_addr[4], r->orig_addr[5],
                              r->cls, r->obs_count,
                              (r->flags & AG_FLAG_REPLAY_ELIGIBLE) != 0,
                              (r->flags & AG_FLAG_DEPARTING) != 0,

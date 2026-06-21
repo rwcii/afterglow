@@ -224,9 +224,12 @@ static void adv_service(const adv_req_t *req)
     // a normal build): emit a ground-truth line so the host harness can assert
     // the address and power a replay slot puts on air.
     if (req->has_addr) {
+        // req->addr is the cloned AdvA in esp_bd_addr_t / MSB-first order (exactly
+        // what is handed to esp_ble_gap_set_rand_addr). Print it forward so it
+        // matches the STIM log and the harness's captured stimulus address.
         ESP_LOGI(TAG, "ONAIR emit addr=%02x:%02x:%02x:%02x:%02x:%02x pwr_idx=%d adlen=%u",
-                 req->addr[5], req->addr[4], req->addr[3], req->addr[2],
-                 req->addr[1], req->addr[0], (int)req->tx_power_idx,
+                 req->addr[0], req->addr[1], req->addr[2], req->addr[3],
+                 req->addr[4], req->addr[5], (int)req->tx_power_idx,
                  (unsigned)req->frame_len);
     }
 #endif
