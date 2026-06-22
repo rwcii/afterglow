@@ -31,10 +31,14 @@ jobs:
     runs-on: [self-hosted, linux, x64, afterglow-rig]
     # Status-only: never fails a PR even after the runner exists.
     continue-on-error: true
-    # Nightly + dispatch always; on PRs only when explicitly labelled.
+    # Nightly + dispatch always; on PRs only when explicitly labelled AND the PR
+    # head is a branch in THIS repo (never a fork). Self-hosted runners must
+    # never execute untrusted fork code: the label is a maintainer gate, and the
+    # same-repo check is a hard backstop so even a mislabelled fork PR cannot run.
     if: >-
       github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'run-onair-rig')
+      (contains(github.event.pull_request.labels.*.name, 'run-onair-rig') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     env:
       # LIVE rig quorum: a run passes if 3 of 5 independent repeats pass, with one
       # retry per repeat. The harness refactor stays 1/1 by default; these values
