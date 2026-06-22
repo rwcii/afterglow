@@ -31,8 +31,7 @@ static ag_seen_t s_seen;
 
 // Mesh service id (manufacturer-specific 0xFF AD). The protocol version
 // (AG_MESH_VERSION, in mesh_logic.h) is carried on both HELLO and every DATA
-// fragment and gated on receive; v2 added addr_type + origin_lo16 to the DATA
-// frame (see the DATA layout below).
+// fragment and gated on receive (see the DATA layout below).
 #define MESH_SVC_LO 0xAF
 #define MESH_SVC_HI 0x6C
 
@@ -134,7 +133,7 @@ esp_err_t mesh_init(void)
 //   [len][0xFF][SVC_LO][SVC_HI][type][version][ ...type-specific... ]
 // type 0x01 = HELLO: [nodeid_lo24:3][version:1]
 // type 0x02 = DATA:  [version:1][ttl:1][frag_byte:1][rec_id:2][addr_type:1]
-//             [origin_lo16:2][body...]  (frag_byte = frag_index<<4 | frag_total).
+//             [origin_lo24:3][body...]  (frag_byte = frag_index<<4 | frag_total).
 //             version (AG_MESH_VERSION) comes FIRST, before any layout-dependent
 //             field, so the gate can read it without already knowing the layout;
 //             it is gated on receive so a peer speaking a different layout is
@@ -142,9 +141,11 @@ esp_err_t mesh_init(void)
 //             band (see AG_MESH_VERSION) so it cannot be mistaken for the `ttl`
 //             an older versionless DATA frame carried at this same offset. addr_type lets
 //             the receiver recompute the SAME rec_id the seen-set deduped on
-//             (rec_id = hash(addr_type||orig_addr||payload)); origin_lo16 carries
-//             the first air-capturer's NodeID low-16 so the return-to-source /
-//             own-origin guards hold across hops.
+//             (rec_id = hash(addr_type||orig_addr||payload)); origin_lo24 carries
+//             the first air-capturer's NodeID low-24 so the return-to-source /
+//             own-origin guards hold across hops (lo24, not lo16, so two nodes
+//             sharing a NodeID's low 16 bits don't false-trip the own-origin
+//             guard — matches the HELLO nodeid_lo24 field).
 #define MESH_TYPE_HELLO 0x01
 #define MESH_TYPE_DATA  0x02
 
@@ -161,8 +162,8 @@ esp_err_t mesh_init(void)
 #define MESH_HELLO_LEN (MESH_AD_HDR + MESH_HELLO_HDR)
 // DATA type-specific header bytes, from the `type` byte through origin_hi:
 // type, version, ttl, frag_byte, rec_lo, rec_hi, addr_type, origin_lo,
-// origin_hi = 9.
-#define MESH_DATA_HDR 9
+// origin_mid, origin_hi = 10.
+#define MESH_DATA_HDR 10
 // Bytes after the AD length byte that precede the body (svc framing + DATA
 // header). The length byte itself (adv[0]) is set to this + body length, and the
 // parser keys body_len off ad_len - this.
@@ -200,7 +201,7 @@ static void emit_record(const ag_beacon_record_t *r)
     // Carry TTL: a fresh air-captured record (hop_ttl 0) starts at TTL_INIT;
     // a relayed record carries its remaining hop_ttl. ttl==0 is replay-only.
     uint8_t carry_ttl = r->hop_ttl ? r->hop_ttl : AG_TTL_INIT;
-    uint16_t origin_lo16 = (uint16_t)(r->origin_node & 0xFFFFu);
+    uint32_t origin_lo24 = r->origin_node & 0xFFFFFFu;
     uint8_t frags = ag_mesh_frag_count(r->payload_len, AG_MESH_FRAG_BODY);
 #ifdef AG_ONAIR_TEST
     ESP_LOGI(TAG, "ONAIR mesh data-tx rec=%04x frags=%u", r->rec_id, frags);
@@ -211,7 +212,7 @@ static void emit_record(const ag_beacon_record_t *r)
         uint8_t body = (uint8_t)(r->payload_len - off);
         if (body > AG_MESH_FRAG_BODY) body = AG_MESH_FRAG_BODY;
         // [len][0xFF][SVC_LO][SVC_HI][DATA][version][ttl][frag][rec_lo][rec_hi]
-        // [addr_type][origin_lo][origin_hi][body]
+        // [addr_type][origin_lo][origin_mid][origin_hi][body]
         adv[0]  = (uint8_t)(MESH_DATA_PRE + body); // bytes after the length byte
         adv[1]  = 0xFF;
         adv[2]  = MESH_SVC_LO; adv[3] = MESH_SVC_HI;
@@ -222,8 +223,9 @@ static void emit_record(const ag_beacon_record_t *r)
         adv[8]  = (uint8_t)(r->rec_id & 0xFF);
         adv[9]  = (uint8_t)(r->rec_id >> 8);
         adv[10] = r->addr_type;
-        adv[11] = (uint8_t)(origin_lo16 & 0xFF);
-        adv[12] = (uint8_t)(origin_lo16 >> 8);
+        adv[11] = (uint8_t)(origin_lo24 & 0xFF);
+        adv[12] = (uint8_t)((origin_lo24 >> 8) & 0xFF);
+        adv[13] = (uint8_t)((origin_lo24 >> 16) & 0xFF);
         memcpy(&adv[1 + MESH_DATA_PRE], r->payload + off, body);
         // Connectionless DATA is unacknowledged and a record absorbs only if ALL
         // its fragments land, so loss of any one fragment loses the whole record.
@@ -264,11 +266,29 @@ static void transfer_to_peer(uint16_t peer_lo16)
                                             peer_lo16,
                                             s_cfg.mesh_transfer_fraction,
                                             cap, &s_rng, sel, out_max);
+    // Selection returns pool INDICES; emission must not re-dereference a stale
+    // index. What makes this safe is that no eviction sweep runs between select
+    // and emit: transfer_to_peer is driven from the capture path (mesh_try_consume
+    // on a HELLO) while pool_evict_sweep runs on the app-loop task, and nothing in
+    // this flow mutates the pool. On top of that invariant, copy each selected
+    // record into a local before emitting from it, so we never hand emit_record a
+    // pool pointer that the contract says is valid only until the next sweep.
+    // Copying per record (one ~sizeof(record) stack local, not a 32-wide array)
+    // keeps this off the small NimBLE host-task stack. NOTE: the per-record copy
+    // closes only the retained-pointer hazard; if a sweep could ever run
+    // concurrently it would shift indices in sel[] and we would copy the WRONG
+    // record — so the single-threaded-wrt-sweeps invariant above is the load-
+    // bearing guarantee, not the copy. Revisit (snapshot all indices up front, or
+    // a freeze/lock) before moving transfer off the capture task.
+    uint8_t emitted = 0;
     for (uint8_t k = 0; k < sent; k++) {
         const ag_beacon_record_t *r = pool_record_at(sel[k]);
-        if (r) emit_record(r);
+        if (!r) continue;
+        ag_beacon_record_t snap = *r;   // detach from the pool slab before emit
+        emit_record(&snap);
+        emitted++;
     }
-    if (sent) ESP_LOGI(TAG, "transferred %u records to peer %04x", sent, peer_lo16);
+    if (emitted) ESP_LOGI(TAG, "transferred %u records to peer %04x", emitted, peer_lo16);
 }
 
 // Gate one fully-reassembled inbound record against the loop/amplification
@@ -285,15 +305,17 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
         if (p && p->rec_id == rec->rec_id) { in_pool = true; pool_ttl = p->hop_ttl; break; }
     }
     uint8_t out_ttl = 0;
-    // origin_node arrives as the wire origin_lo16 (low-16 of the first
-    // air-capturer's NodeID); compare own-origin on the same 16-bit field so the
-    // guard is real across hops (a true own-origin record returns with our lo16).
-    // ag_mesh_evaluate treats origin==0 as "unknown, skip the own-origin check",
-    // so bias both sides into a nonzero subspace (set bit 16) — otherwise a node
-    // whose lo16 is 0 would never recognize its own-origin records. The DATA path
+    // origin_node arrives as the wire origin_lo24 (low-24 of the first
+    // air-capturer's NodeID); compare own-origin on the same 24-bit field so the
+    // guard is real across hops (a true own-origin record returns with our lo24).
+    // lo24 (vs lo16) makes a false own-origin match — two distinct nodes sharing
+    // the compared low bits — 256x rarer. ag_mesh_evaluate treats origin==0 as
+    // "unknown, skip the own-origin check", so bias both sides into a nonzero
+    // subspace (set bit 24, just above the lo24 field) — otherwise a node whose
+    // lo24 is 0 would never recognize its own-origin records. The DATA path
     // always carries an origin, so there is no genuine "unknown" case to lose.
-    uint32_t origin_keyed = origin_node | 0x10000u;
-    uint32_t self_keyed   = (s_node_id & 0xFFFFu) | 0x10000u;
+    uint32_t origin_keyed = (origin_node & 0xFFFFFFu) | 0x1000000u;
+    uint32_t self_keyed   = (s_node_id & 0xFFFFFFu) | 0x1000000u;
     ag_mesh_verdict_t v = ag_mesh_evaluate(&s_seen, rec->rec_id, inbound_ttl,
                                            origin_keyed, self_keyed,
                                            in_pool, pool_ttl, &out_ttl);
@@ -309,6 +331,11 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
     if (v == AG_MESH_ACCEPT) {
         rec->hop_ttl = out_ttl;
         rec->origin_node = origin_node;   // preserve first air-capturer
+        // Mark provenance: this record arrived over the mesh from a foreign
+        // origin. Carry-eligibility uses this (not a 16-bit origin coincidence)
+        // to keep an exhausted relay replay-only instead of treating it as a
+        // fresh own air-capture.
+        rec->flags |= AG_FLAG_RELAYED;
         int idx = pool_insert_record(rec, true);  // trust the carried wire rec_id
 #ifdef AG_ONAIR_TEST
         // The record carries the wire rec_id (the stable id the seen-set deduped
@@ -427,11 +454,11 @@ bool mesh_try_consume(const ag_capture_t *cap)
     if (type == MESH_TYPE_DATA && ad_len >= MESH_DATA_PRE) {
         // ad_len counts the bytes after the length byte (svc framing + DATA
         // header + body). DATA header: [type][version][ttl][frag][rec_lo]
-        // [rec_hi][addr_type][origin_lo][origin_hi].
+        // [rec_hi][addr_type][origin_lo][origin_mid][origin_hi].
         uint8_t frame_version = ad[5];
         // Reject a DATA frame whose wire version we don't speak: its field layout
-        // differs (a v1 frame has no version/addr_type/origin bytes here), so
-        // parsing it as v2 would shift the body and corrupt reassembly/dedup.
+        // differs (an older frame has a different header here), so parsing it as
+        // the current version would shift the body and corrupt reassembly/dedup.
         if (!ag_mesh_version_ok(frame_version)) {
 #ifdef AG_ONAIR_TEST
             ESP_LOGI(TAG, "ONAIR mesh data-badver ver=%02x", (unsigned)frame_version);
@@ -442,12 +469,13 @@ bool mesh_try_consume(const ag_capture_t *cap)
         uint8_t frag_byte = ad[7];
         uint16_t rec_id = (uint16_t)(ad[8] | (ad[9] << 8));
         uint8_t addr_type = ad[10];
-        uint32_t origin_lo16 = (uint32_t)(ad[11] | (ad[12] << 8));
+        uint32_t origin_lo24 = (uint32_t)ad[11] | ((uint32_t)ad[12] << 8) |
+                               ((uint32_t)ad[13] << 16);
         const uint8_t *body = &ad[1 + MESH_DATA_PRE];
         uint8_t body_len = (uint8_t)(ad_len - MESH_DATA_PRE);
-        // origin_lo16 is the first air-capturer's NodeID low-16, carried so the
+        // origin_lo24 is the first air-capturer's NodeID low-24, carried so the
         // return-to-source / own-origin guards hold across hops.
-        on_data_fragment(ttl, frag_byte, rec_id, addr_type, origin_lo16,
+        on_data_fragment(ttl, frag_byte, rec_id, addr_type, origin_lo24,
                          body, body_len);
         return true;
     }

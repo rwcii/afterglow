@@ -124,6 +124,12 @@ void ag_life_make_successor(const ag_beacon_record_t *parent,
     // fresh presence for the new address only: just-observed, not yet flagged.
     child->last_seen_ms = now_ms;
     child->obs_count = 1;
+    // Clear DEPARTING only. AG_FLAG_RELAYED MUST ride through rotation unchanged:
+    // it records that this lineage originated on a FOREIGN node (mesh-absorbed),
+    // which the successor inherits along with parent->origin_node and hop_ttl. Do
+    // NOT add RELAYED to this mask — clearing it would make a rotated successor of
+    // an exhausted foreign relay look like a fresh own air-capture, and mesh
+    // carry-eligibility would re-emit a ttl0 record that must stay replay-only.
     child->flags = (uint8_t)(parent->flags & ~AG_FLAG_DEPARTING);
     child->rec_id = 0;  // wrapper recomputes from the new addr + payload
 }

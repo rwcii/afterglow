@@ -38,13 +38,31 @@ bool ag_mesh_carry_eligible(const ag_beacon_record_t *rec)
 static bool carryable(const ag_beacon_record_t *r, uint16_t self_node,
                       uint16_t peer_node_lo16)
 {
+    (void)self_node;   // provenance is now a record flag, not an origin compare
     if (!ag_mesh_carry_eligible(r)) return false;
     uint16_t origin_lo16 = (uint16_t)(r->origin_node & 0xFFFFu);
-    // never hand a record back toward its source node.
+    // Never hand a record back toward its source node. This return-to-source
+    // guard stays at lo16 (unlike the own-origin guard, widened to lo24): the
+    // peer id is carried only as lo16 on the transfer path (transfer_to_peer
+    // takes peer_lo16), so widening here would require propagating a wider peer
+    // id through HELLO discovery -> contact table -> selection. A lo16 peer
+    // collision (~1/65536) at worst suppresses one carry or fails to suppress one
+    // return-to-source hop; the TTL + seen-set hard guards still bound diffusion,
+    // so this is a deliberately bounded soft hint, not a correctness guard.
     if (origin_lo16 == peer_node_lo16) return false;
-    // a relayed record (foreign origin) at ttl 0 is exhausted; a local-origin
-    // record at ttl 0 is a fresh air capture and still carryable.
-    if (r->hop_ttl == 0 && origin_lo16 != self_node) return false;
+    // a relayed record (foreign origin) at ttl 0 is exhausted (replay-only); a
+    // local air-captured record at ttl 0 is a fresh own capture and still
+    // carryable. Distinguish the two by the RELAYED provenance flag rather than
+    // by an origin-lo16 coincidence: two nodes can share a NodeID's low 16 bits,
+    // which would otherwise misclassify an exhausted foreign relay as own and
+    // keep it (wrongly) carryable.
+    // INVARIANT: any foreign-origin record admitted to the pool MUST carry
+    // AG_FLAG_RELAYED. The only ingest path for one is mesh_absorb_inbound, which
+    // sets it; local air-capture (ag_pool_admit) is genuinely own-origin and
+    // leaves it clear. The default here is "unflagged => own => carryable", so a
+    // NEW foreign-ingest path that forgets the flag would wrongly keep a ttl0
+    // relay carryable — set RELAYED at any such path.
+    if (r->hop_ttl == 0 && (r->flags & AG_FLAG_RELAYED)) return false;
     return true;
 }
 

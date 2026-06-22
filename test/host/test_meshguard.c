@@ -46,6 +46,44 @@ int main(void)
         CHECK(v == AG_MESH_DROP_OWN_ORIGIN);
     }
 
+    // (2b) origin keying width (the #54 lo16-collision fix): the absorb wrapper
+    //      keys the own-origin guard on the wire origin's LOW 24 bits (biased
+    //      above the lo24 space). Two distinct nodes that collide in their low 16
+    //      bits but differ in bit[16..23] must NOT be treated as own-origin — a
+    //      record from such a peer must still be ACCEPTed (it would have FALSE
+    //      DROP_OWN_ORIGIN'd under the old lo16 keying). Model the exact keying
+    //      mesh_absorb_inbound applies.
+    {
+        // self and a foreign origin that share lo16 (0x4321) but differ in lo24.
+        const uint32_t self_full   = 0x00114321u;  // lo24 = 0x114321
+        const uint32_t origin_full = 0x00224321u;  // lo24 = 0x224321, same lo16
+        uint32_t origin_keyed = (origin_full & 0xFFFFFFu) | 0x1000000u;
+        uint32_t self_keyed   = (self_full   & 0xFFFFFFu) | 0x1000000u;
+        // Sanity: the old lo16 keying WOULD have collided (false own-origin).
+        CHECK_MSG(((origin_full & 0xFFFFu) | 0x10000u) ==
+                  ((self_full & 0xFFFFu) | 0x10000u),
+                  "test premise: the two nodes collide under lo16 keying");
+        // The new lo24 keying must distinguish them.
+        CHECK_MSG(origin_keyed != self_keyed,
+                  "lo24 keying must distinguish nodes that share only lo16");
+        ag_seen_t seen;
+        ag_seen_init(&seen, ids, stamps, 64);
+        uint8_t out;
+        ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, 0x56, AG_TTL_INIT,
+            origin_keyed, self_keyed, false, 0, &out);
+        CHECK_MSG(v == AG_MESH_ACCEPT,
+                  "a peer sharing only lo16 must not false-trip own-origin");
+
+        // And a genuine own-origin record (full lo24 match) still DROPs.
+        uint32_t own_keyed = (self_full & 0xFFFFFFu) | 0x1000000u;
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x57, AG_TTL_INIT,
+            own_keyed, self_keyed, false, 0, &out);
+        CHECK_MSG(v2 == AG_MESH_DROP_OWN_ORIGIN,
+                  "a true own-origin record (lo24 match) must still drop");
+    }
+
     // (3) seen-set stops resurrection: once accepted then evicted from the
     //     pool, re-delivery within the LRU horizon is dropped (not re-admitted).
     {
