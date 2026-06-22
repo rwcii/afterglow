@@ -21,6 +21,16 @@ jobs:
         run: cmake --build build/host -j"$(nproc)"
       - name: Test
         run: ctest --test-dir build/host --output-on-failure
+      # Lock the Python separability port to detector.c. The committed vectors are
+      # C-computed; this fails if rig/separability.py drifts from the C reference.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Detector port parity (host-only, no hardware)
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest tools/onair-test/test_separability_parity.py -v
 
   # Builds the firmware for the real target with the pinned IDF.
   idf-build:

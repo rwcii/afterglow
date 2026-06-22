@@ -1,11 +1,55 @@
 # onair-test
 
-An automated on-air test for the BLE replay path. No human in the loop: one
-ESP32-S3 advertises a known source on command, another (the device under test)
-captures, classifies, and re-emits it, and the host harness asserts the emitted
-address against ground truth. A second test (`test_rssi_power.py`) adds a third
-board, a passive observer, to confirm that the per-ghost TX-power level the
-firmware commands actually changes the radiated signal.
+Automated on-air tests for the BLE replay path and mesh, plus an on-air
+separability evaluator. No human in the loop: ESP32-S3 boards play stimulus /
+observer / device-under-test roles over the air, and the host harness asserts
+ground truth from their serial output.
+
+The harnesses share a small framework under `rig/` (one canonical `Board`, role
+and port resolution, stabilization helpers, and the separability evaluator).
+Tests declare the board roles they need with the `rig_roles` marker and the
+`rig` fixture opens only those — so the whole suite **green-skips cleanly with
+no hardware attached** and runs for real on a rig with the boards configured.
+
+## Shared rig framework (`rig/`)
+
+- `board.py` — the canonical `Board` (settle window, bounded writes, buffered
+  pump, regex `wait`, line reader, and `reset_pulse()` for a clean reboot).
+- `roles.py` — `Roles` (DUT, STIMULUS, OBSERVER, PEER_A, PEER_B) and `RigConfig`,
+  which resolves each role to a serial port from the environment. The canonical
+  `AG_<ROLE>_PORT` names are honoured, as are the back-compat aliases the older
+  harnesses used (`AG_STIM_PORT`, `AG_OBS_PORT`, `AG_MESH_A_PORT`, `AG_MESH_B_PORT`).
+- `stabilize.py` — `assert_eventually`, `collect_until`, `retry`, and `quorum`
+  (require K of N independent runs to pass) so timing flakiness is handled once.
+- `ports.py` — opt-in serial-port reclaim via `fuser -k` (`AG_RIG_FUSER_K=1`) and
+  a flash helper.
+- `separability.py` — a pure-Python port of the host `detector.c` primitives plus
+  `score_real_vs_ghost` / `assert_indistinguishable` for the on-air evaluator.
+
+## Separability evaluator and the parity gate
+
+`test_separability_onair.py` scores how close the device-emitted clone's radiated
+signal is to the real source's, along the same feature axes as the host
+`test_separability` (RSSI distribution KS, signal-level variance, cadence
+regularity, 1-D cluster separation). The Python primitives are locked to the C
+reference by `test_separability_parity.py`, a **host-only test that runs in CI
+and gates every PR**: it reproduces fixed inputs, runs both, and asserts the
+Python output matches the C-computed vectors in
+`test/host/separability/parity/expected_vectors.json`. Regenerate those vectors
+(only when `detector.c` changes) with:
+
+```sh
+cmake -S test/host -B build/host && cmake --build build/host -j
+./build/host/gen_vectors > test/host/separability/parity/expected_vectors.json
+```
+
+## What it checks
+
+Two boards advertise / replay (`test_onair.py`); a third passive observer adds
+RSSI/power validation (`test_rssi_power.py`). Mesh discovery and fragmented data
+transfer run on two peer boards (`test_mesh_discovery.py`,
+`test_mesh_transfer.py`); ambient-variance validation uses the DUT + observer
+(`test_ambient_variance.py`).
 
 ## Physical setup
 
@@ -20,11 +64,12 @@ range.
   **observer**.
 
 Each board enumerates as a serial port (`/dev/ttyACM*` on Linux,
-`/dev/cu.usbmodem*` on macOS). The harness defaults assume `ACM0`=DUT,
-`ACM1`=stimulus, `ACM2`=observer; override with the `AG_*_PORT` env vars below if
-yours differ. On Linux a freshly-enumerated board may come up owned by
-`root:dialout`; if flashing fails with a permission error, add your user to the
-`dialout` group (then re-login) or `sudo chmod 666 /dev/ttyACM<n>`.
+`/dev/cu.usbmodem*` on macOS). Set each role's port via its `AG_*_PORT` env var
+(see Run below); a test green-skips if any role it declares is unconfigured, so
+nothing fails when boards are absent. On Linux a freshly-enumerated board may
+come up owned by `root:dialout`; if flashing fails with a permission error, add
+your user to the `dialout` group (then re-login) or `sudo chmod 666
+/dev/ttyACM<n>`.
 
 A note on results: the RSSI/power sweep measures a ghost as it competes for the
 single replay radio against every other replay-eligible source the DUT has
@@ -88,3 +133,33 @@ AG_DUT_PORT=/dev/ttyACM0 AG_STIM_PORT=/dev/ttyACM1 AG_OBS_PORT=/dev/ttyACM2 \
   ladder, the observer's received RSSI rises with it and the `0x0A` TX Power AD
   field matches the emitted power — confirming the per-ghost level actually
   radiates and stays internally consistent.
+- **Separability (on-air):** the device-emitted clone's radiated signal is not
+  separable from the real source's along the configured feature axes.
+
+## Self-hosted on-air rig runner (DORMANT)
+
+`.github/workflows/onair-rig.yml` defines a status-only job that runs this suite
+on a self-hosted runner. It is **dormant**: it targets the runner label
+`afterglow-rig`, which is not registered anywhere, so the job is never picked up.
+It is also `continue-on-error` and not a required check, so it cannot gate a PR.
+On a live runner it runs the suite with a 3-of-5 quorum (`AG_RIG_QUORUM_K=3`,
+`AG_RIG_QUORUM_N=5`, `AG_RIG_RETRIES=1`).
+
+To activate it (only after the dev box migrates to dedicated non-Docker
+hardware), register a self-hosted runner on the rig host and give it the
+matching labels. **These steps are documented, not run by CI:**
+
+```sh
+# On the rig host (Linux x86_64, Python 3.12, gh, 3x ESP32-S3 on ACM0..2):
+./config.sh --url https://github.com/rwcii/afterglow \
+    --token <RUNNER_TOKEN> \
+    --labels self-hosted,linux,x64,afterglow-rig \
+    --name afterglow-rig-01 --work _work
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+Then set the port-role env for the runner service to match the board layout
+(`AG_DUT_PORT`, `AG_STIMULUS_PORT`, `AG_OBSERVER_PORT`, `AG_PEER_A_PORT`,
+`AG_PEER_B_PORT`) and ensure the service account is in the `dialout` group. Once
+the `afterglow-rig` label exists, the workflow goes live automatically (nightly
+at 07:00 UTC, on manual dispatch, and on PRs labelled `run-onair-rig`).

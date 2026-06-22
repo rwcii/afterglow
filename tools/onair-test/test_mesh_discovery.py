@@ -45,13 +45,16 @@ AG_ONAIR_TEST build.
 """
 import os
 import re
+import sys
 import time
+from pathlib import Path
 
-from test_rssi_power import Board
+import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-A_PORT = os.environ.get("AG_MESH_A_PORT", "/dev/ttyACM0")
-B_PORT = os.environ.get("AG_MESH_B_PORT", "/dev/ttyACM1")
+from rig import Board, RigConfig, Roles  # noqa: E402
+
 
 # Discovery window. The HELLO heartbeat is ~3-5 s, so a mutual first contact
 # typically lands within ~10 s; allow generous slack for scan/adv interleave.
@@ -66,18 +69,6 @@ GATED_RE = re.compile(r"ONAIR mesh cooldown-gated self=([0-9a-f]+) peer=([0-9a-f
 def _lo24(id_hex):
     """Low 24 bits of a NodeID hex string, as a zero-padded 6-hex-digit string."""
     return "%06x" % (int(id_hex, 16) & 0xFFFFFF)
-
-
-def _reset(board):
-    """Pulse the ESP32-S3 into a clean reboot via the USB-JTAG reset line, so the
-    boot banner and the very first peer-discovered land inside the capture window
-    (the first contact otherwise fires once at boot and scrolls past)."""
-    board.ser.setDTR(False)
-    board.ser.setRTS(True)   # assert reset
-    time.sleep(0.2)
-    board.ser.setRTS(False)  # release reset
-    time.sleep(0.3)
-    board.drain()            # discard the pre-reset tail
 
 
 def _parse(out, side, line):
@@ -105,8 +96,8 @@ def collect(a, b, seconds):
     """
     out = {f"{s}_{k}": set() for s in ("a", "b")
            for k in ("self", "discovered", "gated", "hello_rx")}
-    _reset(a)
-    _reset(b)
+    a.reset_pulse()
+    b.reset_pulse()
     deadline = time.time() + seconds
     while time.time() < deadline:
         for ln in a.lines():
@@ -117,14 +108,9 @@ def collect(a, b, seconds):
     return out
 
 
-def run(collect_s=COLLECT_S):
-    a = Board(A_PORT)
-    b = Board(B_PORT)
-    try:
-        events = collect(a, b, collect_s)
-    finally:
-        a.close()
-        b.close()
+def _run(a, b, collect_s=COLLECT_S):
+    """Run discovery on already-open boards; return (a_id, b_id, events)."""
+    events = collect(a, b, collect_s)
 
     assert events["a_self"], "peerA never logged a NodeID (AG_ONAIR_TEST + mesh?)"
     assert events["b_self"], "peerB never logged a NodeID (AG_ONAIR_TEST + mesh?)"
@@ -144,10 +130,23 @@ def run(collect_s=COLLECT_S):
     return a_id, b_id, events
 
 
+def run(collect_s=COLLECT_S):
+    """Standalone entry: open both peers, run discovery, print the summary."""
+    cfg = RigConfig()
+    a = Board(cfg.require_port(Roles.PEER_A))
+    b = Board(cfg.require_port(Roles.PEER_B))
+    try:
+        return _run(a, b, collect_s)
+    finally:
+        a.close()
+        b.close()
+
+
 # --- pytest entry -----------------------------------------------------------
 
-def test_mutual_discovery_and_cooldown():
-    a_id, b_id, ev = run()
+@pytest.mark.rig_roles("peer_a", "peer_b")
+def test_mutual_discovery_and_cooldown(rig):
+    a_id, b_id, ev = _run(rig[Roles.PEER_A], rig[Roles.PEER_B])
     # (1) mutual discovery: each node discovered the OTHER's NodeID.
     assert b_id in ev["a_discovered"], \
         f"peerA never discovered peerB ({b_id}); discovered={sorted(ev['a_discovered'])}"
