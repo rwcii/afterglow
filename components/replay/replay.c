@@ -80,10 +80,22 @@ void replay_tick(void)
         uint16_t flen = r->payload_len > sizeof(frame) ? sizeof(frame) : r->payload_len;
         memcpy(frame, r->payload, flen);
 
+        int8_t tx_idx = txentropy_level_for_ghost(r, proto);
+#ifdef AG_ONAIR_TEST
+        // On-air rig only: replace the slow walk value with a deterministic ramp
+        // across the full BLE ladder, so a second-board observer can measure
+        // radiated RSSI against the commanded index over the whole range. Each
+        // BLE slot advances one step; production builds carry none of this.
+        if (proto == AG_PROTO_BLE) {
+            static uint8_t s_sweep_idx;
+            tx_idx = (int8_t)(s_sweep_idx % radio_backend_get()->tx_power_levels(proto));
+            s_sweep_idx++;
+        }
+#endif
         ag_emit_t e = {
             .proto = proto,
             .channel = r->channel,
-            .tx_power_idx = txentropy_level_for_ghost(r, proto),
+            .tx_power_idx = tx_idx,
             .interval_ms = ghost_interval_ms(r),
         };
 
