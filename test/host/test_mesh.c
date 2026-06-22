@@ -2,6 +2,7 @@
 // fragment reassembly state machine, and the wire/pool rec_id round-trip).
 #include "mesh_logic.h"
 #include "pool_logic.h"     // ag_pool_rec_id — wire/pool rec_id round-trip
+#include "ag_core/ag_meshguard.h"  // AG_TTL_INIT — legacy ttl band vs version
 #include "test_util.h"
 #include <string.h>
 
@@ -30,6 +31,25 @@ int main(void)
     const uint8_t REPLAY = AG_FLAG_REPLAY_ELIGIBLE;
     const uint16_t SELF = 0x1111;
     const uint16_t PEER = 0x2222;
+
+    // (0) wire version gate: only the current AG_MESH_VERSION is accepted; a peer
+    //     advertising any other version (an older layout, or a future bump) is
+    //     rejected so HELLO discovery / DATA admission never misparse a frame
+    //     whose field layout they don't understand.
+    CHECK_MSG(ag_mesh_version_ok(AG_MESH_VERSION), "current version must be accepted");
+    CHECK_MSG(!ag_mesh_version_ok(0x01), "an older protocol version must be rejected");
+    CHECK_MSG(!ag_mesh_version_ok((uint8_t)(AG_MESH_VERSION + 1)),
+              "a future version bump must be rejected by this build");
+    CHECK_MSG(!ag_mesh_version_ok(0x00), "version 0 must be rejected");
+    // The DATA version byte shares a wire offset with a legacy DATA frame's ttl
+    // field (0..AG_TTL_INIT). The gate must reject EVERY value a legacy ttl could
+    // hold there, or a versionless legacy frame whose ttl matched the version
+    // would be misparsed. Assert the whole legacy ttl band is rejected.
+    for (uint8_t legacy_ttl = 0; legacy_ttl <= AG_TTL_INIT; legacy_ttl++)
+        CHECK_MSG(!ag_mesh_version_ok(legacy_ttl),
+                  "version must differ from every legacy ttl value (%u)", legacy_ttl);
+    CHECK_MSG(AG_MESH_VERSION > AG_MESH_VERSION_MIN,
+              "version must exceed the legacy-ttl band floor");
 
     // (1) carry gate is STRICTER than replay: replay-eligible but obs_count==1
     //     is NOT carry-eligible (needs multi-sweep persistence).

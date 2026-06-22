@@ -29,11 +29,12 @@ static uint16_t s_seen_ids[MESH_SEEN_CAP];
 static uint32_t s_seen_stamps[MESH_SEEN_CAP];
 static ag_seen_t s_seen;
 
-// Mesh service id (manufacturer-specific 0xFF AD) + protocol version. v2 added
-// addr_type + origin_lo16 to the DATA frame (see the DATA layout below).
+// Mesh service id (manufacturer-specific 0xFF AD). The protocol version
+// (AG_MESH_VERSION, in mesh_logic.h) is carried on both HELLO and every DATA
+// fragment and gated on receive; v2 added addr_type + origin_lo16 to the DATA
+// frame (see the DATA layout below).
 #define MESH_SVC_LO 0xAF
 #define MESH_SVC_HI 0x6C
-#define MESH_VERSION 0x02
 
 // Connectionless transfer reliability: each DATA fragment is enqueued this many
 // times (the transport is unacked and a record absorbs only if every fragment
@@ -130,10 +131,16 @@ esp_err_t mesh_init(void)
 }
 
 // Mesh frame layout, inside a manufacturer-specific (0xFF) AD structure:
-//   [len][0xFF][SVC_LO][SVC_HI][type][ ...type-specific... ]
-// type 0x01 = HELLO: [nodeid_lo24:3]
-// type 0x02 = DATA:  [ttl:1][frag_byte:1][rec_id:2][addr_type:1][origin_lo16:2]
-//             [body...]  (frag_byte = frag_index<<4 | frag_total). addr_type lets
+//   [len][0xFF][SVC_LO][SVC_HI][type][version][ ...type-specific... ]
+// type 0x01 = HELLO: [nodeid_lo24:3][version:1]
+// type 0x02 = DATA:  [version:1][ttl:1][frag_byte:1][rec_id:2][addr_type:1]
+//             [origin_lo16:2][body...]  (frag_byte = frag_index<<4 | frag_total).
+//             version (AG_MESH_VERSION) comes FIRST, before any layout-dependent
+//             field, so the gate can read it without already knowing the layout;
+//             it is gated on receive so a peer speaking a different layout is
+//             rejected rather than misparsed. Its value lives in a reserved high
+//             band (see AG_MESH_VERSION) so it cannot be mistaken for the `ttl`
+//             an older versionless DATA frame carried at this same offset. addr_type lets
 //             the receiver recompute the SAME rec_id the seen-set deduped on
 //             (rec_id = hash(addr_type||orig_addr||payload)); origin_lo16 carries
 //             the first air-capturer's NodeID low-16 so the return-to-source /
@@ -144,9 +151,18 @@ esp_err_t mesh_init(void)
 // AD framing bytes between the length byte and the type byte: 0xFF, SVC_LO,
 // SVC_HI.
 #define MESH_AD_HDR 3
+// HELLO type-specific header bytes, from the `type` byte through version:
+// type, nodeid_lo24 (3), version = 5. The version sits LAST (its historical
+// position; the layout is fixed-size so a fixed offset is unambiguous) — the
+// gate keys on its value. One constant ties the emit length, the parse guard,
+// and the version-byte index together so they cannot drift apart.
+#define MESH_HELLO_HDR 5
+// Total bytes after the AD length byte for a HELLO (svc framing + HELLO header).
+#define MESH_HELLO_LEN (MESH_AD_HDR + MESH_HELLO_HDR)
 // DATA type-specific header bytes, from the `type` byte through origin_hi:
-// type, ttl, frag_byte, rec_lo, rec_hi, addr_type, origin_lo, origin_hi = 8.
-#define MESH_DATA_HDR 8
+// type, version, ttl, frag_byte, rec_lo, rec_hi, addr_type, origin_lo,
+// origin_hi = 9.
+#define MESH_DATA_HDR 9
 // Bytes after the AD length byte that precede the body (svc framing + DATA
 // header). The length byte itself (adv[0]) is set to this + body length, and the
 // parser keys body_len off ad_len - this.
@@ -156,13 +172,13 @@ esp_err_t mesh_init(void)
 // type in mfg-data; recognized by peers during their normal passive scan.
 static void emit_hello(void)
 {
-    uint8_t adv[9];
-    adv[0] = 0x08;          // AD length (bytes after this one)
+    uint8_t adv[1 + MESH_HELLO_LEN];
+    adv[0] = MESH_HELLO_LEN; // AD length (bytes after this one)
     adv[1] = 0xFF;          // manufacturer-specific
     adv[2] = MESH_SVC_LO; adv[3] = MESH_SVC_HI;
     adv[4] = MESH_TYPE_HELLO;
     memcpy(&adv[5], &s_node_id, 3);     // low 24 bits of NodeID
-    adv[8] = MESH_VERSION;
+    adv[MESH_HELLO_LEN] = AG_MESH_VERSION;   // version byte: last field of HELLO
     ag_emit_t e = {
         .proto = AG_PROTO_BLE, .frame = adv, .frame_len = sizeof(adv),
         .channel = 37, .tx_power_idx = 8, .interval_ms = 100, .priority = true,
@@ -194,19 +210,20 @@ static void emit_record(const ag_beacon_record_t *r)
         uint8_t off = (uint8_t)(f * AG_MESH_FRAG_BODY);
         uint8_t body = (uint8_t)(r->payload_len - off);
         if (body > AG_MESH_FRAG_BODY) body = AG_MESH_FRAG_BODY;
-        // [len][0xFF][SVC_LO][SVC_HI][DATA][ttl][frag][rec_lo][rec_hi]
+        // [len][0xFF][SVC_LO][SVC_HI][DATA][version][ttl][frag][rec_lo][rec_hi]
         // [addr_type][origin_lo][origin_hi][body]
         adv[0]  = (uint8_t)(MESH_DATA_PRE + body); // bytes after the length byte
         adv[1]  = 0xFF;
         adv[2]  = MESH_SVC_LO; adv[3] = MESH_SVC_HI;
         adv[4]  = MESH_TYPE_DATA;
-        adv[5]  = carry_ttl;
-        adv[6]  = (uint8_t)((f << 4) | (frags & 0x0F));
-        adv[7]  = (uint8_t)(r->rec_id & 0xFF);
-        adv[8]  = (uint8_t)(r->rec_id >> 8);
-        adv[9]  = r->addr_type;
-        adv[10] = (uint8_t)(origin_lo16 & 0xFF);
-        adv[11] = (uint8_t)(origin_lo16 >> 8);
+        adv[5]  = AG_MESH_VERSION;
+        adv[6]  = carry_ttl;
+        adv[7]  = (uint8_t)((f << 4) | (frags & 0x0F));
+        adv[8]  = (uint8_t)(r->rec_id & 0xFF);
+        adv[9]  = (uint8_t)(r->rec_id >> 8);
+        adv[10] = r->addr_type;
+        adv[11] = (uint8_t)(origin_lo16 & 0xFF);
+        adv[12] = (uint8_t)(origin_lo16 >> 8);
         memcpy(&adv[1 + MESH_DATA_PRE], r->payload + off, body);
         // Connectionless DATA is unacknowledged and a record absorbs only if ALL
         // its fragments land, so loss of any one fragment loses the whole record.
@@ -368,7 +385,19 @@ bool mesh_try_consume(const ag_capture_t *cap)
 
     uint8_t type = ad[4];
     uint32_t t = now_ms();
-    if (type == MESH_TYPE_HELLO && ad_len >= 7) {
+    if (type == MESH_TYPE_HELLO && ad_len >= MESH_HELLO_LEN) {
+        // ad: [0xFF][SVC_LO][SVC_HI][type][lo24_0][lo24_1][lo24_2][version]
+        uint8_t peer_version = ad[MESH_HELLO_LEN];
+        // A peer speaking a different wire version has a layout we cannot parse
+        // safely; ignore its HELLO entirely (no contact-table entry, no transfer)
+        // so we never emit DATA it would misparse nor accept DATA from it.
+        if (!ag_mesh_version_ok(peer_version)) {
+#ifdef AG_ONAIR_TEST
+            ESP_LOGI(TAG, "ONAIR mesh hello-badver self=%06x ver=%02x",
+                     (unsigned)(s_node_id & 0xFFFFFF), (unsigned)peer_version);
+#endif
+            return true;   // recognized mesh frame, wrong version — consume, drop
+        }
         uint32_t peer = (uint32_t)ad[5] | ((uint32_t)ad[6] << 8) | ((uint32_t)ad[7] << 16);
         if (peer == (s_node_id & 0xFFFFFF)) return true;   // our own HELLO
 #ifdef AG_ONAIR_TEST
@@ -397,13 +426,23 @@ bool mesh_try_consume(const ag_capture_t *cap)
     }
     if (type == MESH_TYPE_DATA && ad_len >= MESH_DATA_PRE) {
         // ad_len counts the bytes after the length byte (svc framing + DATA
-        // header + body). DATA header: [type][ttl][frag][rec_lo][rec_hi]
-        // [addr_type][origin_lo][origin_hi].
-        uint8_t ttl = ad[5];
-        uint8_t frag_byte = ad[6];
-        uint16_t rec_id = (uint16_t)(ad[7] | (ad[8] << 8));
-        uint8_t addr_type = ad[9];
-        uint32_t origin_lo16 = (uint32_t)(ad[10] | (ad[11] << 8));
+        // header + body). DATA header: [type][version][ttl][frag][rec_lo]
+        // [rec_hi][addr_type][origin_lo][origin_hi].
+        uint8_t frame_version = ad[5];
+        // Reject a DATA frame whose wire version we don't speak: its field layout
+        // differs (a v1 frame has no version/addr_type/origin bytes here), so
+        // parsing it as v2 would shift the body and corrupt reassembly/dedup.
+        if (!ag_mesh_version_ok(frame_version)) {
+#ifdef AG_ONAIR_TEST
+            ESP_LOGI(TAG, "ONAIR mesh data-badver ver=%02x", (unsigned)frame_version);
+#endif
+            return true;   // recognized mesh frame, wrong version — consume, drop
+        }
+        uint8_t ttl = ad[6];
+        uint8_t frag_byte = ad[7];
+        uint16_t rec_id = (uint16_t)(ad[8] | (ad[9] << 8));
+        uint8_t addr_type = ad[10];
+        uint32_t origin_lo16 = (uint32_t)(ad[11] | (ad[12] << 8));
         const uint8_t *body = &ad[1 + MESH_DATA_PRE];
         uint8_t body_len = (uint8_t)(ad_len - MESH_DATA_PRE);
         // origin_lo16 is the first air-capturer's NodeID low-16, carried so the
