@@ -117,7 +117,7 @@ uint16_t pool_count(void) { return s_count; }
 uint16_t pool_capacity(void) { return s_capacity; }
 uint32_t pool_node_id(void) { return s_node_id; }
 
-int pool_insert_record(const ag_beacon_record_t *rec)
+int pool_insert_record(const ag_beacon_record_t *rec, bool trust_rec_id)
 {
     if (!rec) return -1;
     if (s_count >= s_capacity) {
@@ -126,8 +126,12 @@ int pool_insert_record(const ag_beacon_record_t *rec)
     }
     ag_beacon_record_t *dst = &s_slab[s_count];
     *dst = *rec;
-    dst->rec_id = ag_pool_rec_id(dst->addr_type, dst->orig_addr,
-                                 dst->payload, dst->payload_len);
+    // Keep a meshed record's carried rec_id (the stable id its sender's seen-set
+    // deduped on); (re)compute one only for a freshly built local record.
+    if (!trust_rec_id) {
+        dst->rec_id = ag_pool_rec_id(dst->addr_type, dst->orig_addr,
+                                     dst->payload, dst->payload_len);
+    }
     int idx = (int)s_count;
     s_count++;
     return idx;

@@ -79,9 +79,15 @@ int pool_last_admitted(void);
 uint32_t pool_node_id(void);
 
 // Insert a fully-prepared record (e.g. a rotation successor built by lifecycle,
-// or a record absorbed over the mesh). Recomputes rec_id from the record's
-// identity+payload. Returns the slot index, or -1 if the slab is full.
-int pool_insert_record(const ag_beacon_record_t *rec);
+// or a record absorbed over the mesh). When trust_rec_id is false the id is
+// (re)computed from the record's identity+payload (a freshly built local
+// record); when true the record's rec_id is kept as-is. A meshed record carries
+// the stable rec_id the sender's seen-set deduped on, frozen at the sender's
+// FIRST sighting while the stored payload tracks the LATEST sighting — so
+// recomputing it here would mint a different id than the wire deduped on, so the
+// mesh path passes trust_rec_id=true. Returns the slot index, or -1 if full.
+// (rec_id is NOT overloaded as a sentinel: 0 is a legitimate hash output.)
+int pool_insert_record(const ag_beacon_record_t *rec, bool trust_rec_id);
 
 // Current number of live records.
 uint16_t pool_count(void);

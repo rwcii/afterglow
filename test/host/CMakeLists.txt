@@ -60,7 +60,8 @@ target_link_libraries(components_host PUBLIC afterglow_core m)
 enable_testing()
 
 # --- unit tests -----------------------------------------------------------
-foreach(t test_eviction test_txwalk test_subset test_meshguard test_txad)
+foreach(t test_eviction test_txwalk test_subset test_meshguard test_txad
+          test_mesh_diffusion test_mesh_collision)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE afterglow_core)
     add_test(NAME ${t} COMMAND ${t})

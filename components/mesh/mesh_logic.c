@@ -1,5 +1,6 @@
 // mesh_logic.c — portable mesh transfer math (host-tested in test_mesh.c).
 #include "mesh_logic.h"
+#include <string.h>     // memset / memcpy (reassembly staging)
 
 bool ag_mesh_carry_eligible(const ag_beacon_record_t *rec)
 {
@@ -38,12 +39,13 @@ static float recency_weight(uint32_t last_seen_ms, uint32_t newest_ms)
     return 1.0f / (1.0f + (float)age);
 }
 
-uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
-                              uint16_t self_node, uint16_t peer_node_lo16,
-                              float fraction, uint8_t cap, ag_prng_t *rng,
-                              uint16_t *out_idx, uint8_t out_max)
+uint8_t ag_mesh_select_subset_fn(const ag_beacon_record_t *(*get)(void *, uint16_t),
+                                 void *ctx, uint16_t count,
+                                 uint16_t self_node, uint16_t peer_node_lo16,
+                                 float fraction, uint8_t cap, ag_prng_t *rng,
+                                 uint16_t *out_idx, uint8_t out_max)
 {
-    if (slab == NULL || out_idx == NULL || out_max == 0 || count == 0) return 0;
+    if (get == NULL || out_idx == NULL || out_max == 0 || count == 0) return 0;
     if (fraction < 0.0f) fraction = 0.0f;
     if (fraction > 1.0f) fraction = 1.0f;
 
@@ -51,8 +53,9 @@ uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
     uint16_t n_elig = 0;
     uint32_t newest_ms = 0;
     for (uint16_t i = 0; i < count; i++) {
-        if (carryable(&slab[i], self_node, peer_node_lo16)) {
-            if (slab[i].last_seen_ms > newest_ms) newest_ms = slab[i].last_seen_ms;
+        const ag_beacon_record_t *r = get(ctx, i);
+        if (r && carryable(r, self_node, peer_node_lo16)) {
+            if (r->last_seen_ms > newest_ms) newest_ms = r->last_seen_ms;
             n_elig++;
         }
     }
@@ -75,24 +78,26 @@ uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
         // total weight of still-available carryable records.
         float total = 0.0f;
         for (uint16_t i = 0; i < count; i++) {
-            if (!carryable(&slab[i], self_node, peer_node_lo16)) continue;
+            const ag_beacon_record_t *rr = get(ctx, i);
+            if (!rr || !carryable(rr, self_node, peer_node_lo16)) continue;
             bool taken = false;
             for (uint8_t s = 0; s < n_sel; s++)
                 if (out_idx[s] == i) { taken = true; break; }
             if (taken) continue;
-            total += recency_weight(slab[i].last_seen_ms, newest_ms);
+            total += recency_weight(rr->last_seen_ms, newest_ms);
         }
         if (total <= 0.0f) break;
 
         float r = (float)ag_prng_unit(rng) * total;
         uint16_t chosen = 0xFFFFu;
         for (uint16_t i = 0; i < count; i++) {
-            if (!carryable(&slab[i], self_node, peer_node_lo16)) continue;
+            const ag_beacon_record_t *rr = get(ctx, i);
+            if (!rr || !carryable(rr, self_node, peer_node_lo16)) continue;
             bool taken = false;
             for (uint8_t s = 0; s < n_sel; s++)
                 if (out_idx[s] == i) { taken = true; break; }
             if (taken) continue;
-            float w = recency_weight(slab[i].last_seen_ms, newest_ms);
+            float w = recency_weight(rr->last_seen_ms, newest_ms);
             if (r < w) { chosen = i; break; }
             r -= w;
         }
@@ -100,6 +105,24 @@ uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
         out_idx[n_sel++] = chosen;
     }
     return n_sel;
+}
+
+// Slab getter: a thin adaptor so the contiguous-array entry point shares the
+// exact iterator-based core above.
+static const ag_beacon_record_t *slab_get(void *ctx, uint16_t i)
+{
+    return &((const ag_beacon_record_t *)ctx)[i];
+}
+
+uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
+                              uint16_t self_node, uint16_t peer_node_lo16,
+                              float fraction, uint8_t cap, ag_prng_t *rng,
+                              uint16_t *out_idx, uint8_t out_max)
+{
+    if (slab == NULL) return 0;
+    return ag_mesh_select_subset_fn(slab_get, (void *)slab, count, self_node,
+                                    peer_node_lo16, fraction, cap, rng,
+                                    out_idx, out_max);
 }
 
 uint8_t ag_mesh_frag_count(uint8_t payload_len, uint8_t body_bytes)
@@ -143,4 +166,74 @@ bool ag_contact_should_transfer(ag_contact_t *table, uint8_t cap,
     c->peer_lo24 = peer_lo24;
     c->last_xfer_ms = now_ms;
     return true;
+}
+
+// --- fragment reassembly state machine ------------------------------------
+
+void ag_reasm_reset(ag_reasm_t *r)
+{
+    if (r == NULL) return;
+    memset(r, 0, sizeof(*r));
+}
+
+int ag_reasm_slot_for(ag_reasm_t *slots, int cap, uint16_t rec_id)
+{
+    if (slots == NULL || cap <= 0) return 0;
+    // existing slot for this rec_id wins.
+    for (int i = 0; i < cap; i++)
+        if (slots[i].used && slots[i].rec_id == rec_id) return i;
+    // else first free slot.
+    for (int i = 0; i < cap; i++)
+        if (!slots[i].used) return i;
+    // else a deterministic overwrite victim under slot pressure.
+    return (int)(rec_id % (uint16_t)cap);
+}
+
+// Largest fragment count the staging buffer + have_mask can actually hold:
+// have_mask is a uint8_t (8 bits) and a fragment's body must land within the
+// 31-byte payload (frag_idx * AG_MESH_FRAG_BODY < 31). Both cap the real ceiling
+// well below the 4-bit wire field's 15, so a frame declaring more fragments than
+// this is malformed and must be rejected rather than silently truncated.
+#define AG_REASM_MAX_FRAGS \
+    ((31 + AG_MESH_FRAG_BODY - 1) / AG_MESH_FRAG_BODY < 8 \
+        ? (31 + AG_MESH_FRAG_BODY - 1) / AG_MESH_FRAG_BODY : 8)
+
+ag_reasm_verdict_t ag_reasm_add(ag_reasm_t *r, uint16_t rec_id, uint8_t frag_byte,
+                                const uint8_t *body, uint8_t body_len)
+{
+    if (r == NULL) return AG_REASM_BADFRAG;
+    uint8_t frag_idx = (uint8_t)(frag_byte >> 4);
+    uint8_t frag_tot = (uint8_t)(frag_byte & 0x0F);
+    // Malformed header: zero fragments, an index outside the declared total, or a
+    // total larger than the staging buffer / have_mask can represent (the wire
+    // field allows up to 15, but a 31-byte body over AG_MESH_FRAG_BODY chunks
+    // and an 8-bit mask support far fewer — reject rather than truncate).
+    if (frag_tot == 0 || frag_tot > AG_REASM_MAX_FRAGS || frag_idx >= frag_tot)
+        return AG_REASM_BADFRAG;
+    // The fragment body must fit at its offset; an out-of-range fragment would be
+    // marked present without being staged (a corrupt early-COMPLETE), so drop it.
+    uint8_t off = (uint8_t)(frag_idx * AG_MESH_FRAG_BODY);
+    if (body == NULL || (uint16_t)off + body_len > sizeof(r->payload))
+        return AG_REASM_BADFRAG;
+
+    // (Re)claim the slot for this rec_id on first fragment or on reuse.
+    if (!r->used || r->rec_id != rec_id) {
+        ag_reasm_reset(r);
+        r->used = true;
+        r->rec_id = rec_id;
+        r->frag_total = frag_tot;
+    }
+    // A fragment whose declared total disagrees with the slot's (set by the first
+    // fragment of this rec_id) is inconsistent — drop it rather than completing
+    // against the wrong mask.
+    if (r->frag_total != frag_tot) return AG_REASM_BADFRAG;
+
+    // Stage the body at the fragment's (bounds-checked) offset.
+    memcpy(r->payload + off, body, body_len);
+    if ((uint16_t)off + body_len > r->payload_len)
+        r->payload_len = (uint8_t)(off + body_len);
+    r->have_mask |= (uint8_t)(1u << frag_idx);
+
+    uint8_t full = (uint8_t)((1u << frag_tot) - 1);
+    return ((r->have_mask & full) == full) ? AG_REASM_COMPLETE : AG_REASM_PARTIAL;
 }

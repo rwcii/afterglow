@@ -27,6 +27,12 @@ extern "C" {
 // most this many body fragments.
 #define AG_MESH_FRAG_MAX 15
 
+// Body bytes carried per DATA fragment. The DATA frame header (type, ttl,
+// frag_byte, rec_id:2, addr_type, origin_lo16:2) leaves room for this many
+// payload bytes in a 31-byte adv. BOTH the emit side and the reassembly side
+// MUST use this one constant so the fragment offset math can never drift.
+#define AG_MESH_FRAG_BODY 16
+
 // One slot in the contact table: a peer discovered on air (low-24 of its
 // NodeID) and the timestamp of the last transfer we made to it. `used` marks
 // the slot occupied. mesh.c owns an array of these (sized by MESH_CONTACTS).
@@ -77,10 +83,62 @@ uint8_t ag_mesh_select_subset(const ag_beacon_record_t *slab, uint16_t count,
                               float fraction, uint8_t cap, ag_prng_t *rng,
                               uint16_t *out_idx, uint8_t out_max);
 
+// Iterator-based selection: the shared core ag_mesh_select_subset is built on.
+// `get(ctx, i)` returns record i (0 <= i < count) or NULL; this lets a caller
+// whose records are NOT a contiguous array (e.g. the on-device pool, indexed by
+// pool_record_at) route its transfer selection through the exact same recency-
+// weighted sampling the slab-based wrapper is host-tested on. Same semantics and
+// return value as ag_mesh_select_subset.
+uint8_t ag_mesh_select_subset_fn(const ag_beacon_record_t *(*get)(void *, uint16_t),
+                                 void *ctx, uint16_t count,
+                                 uint16_t self_node, uint16_t peer_node_lo16,
+                                 float fraction, uint8_t cap, ag_prng_t *rng,
+                                 uint16_t *out_idx, uint8_t out_max);
+
 // Fragment count for a payload: ceil(payload_len / body_bytes), clamped to
 // AG_MESH_FRAG_MAX. body_bytes is the per-fragment body budget (~20 for a 31B
 // adv). Returns 0 for an empty payload; clamps body_bytes==0 to 1.
 uint8_t ag_mesh_frag_count(uint8_t payload_len, uint8_t body_bytes);
+
+// --- fragment reassembly state machine ------------------------------------
+//
+// Pure assemble/have-mask/complete logic for one in-flight record, extracted
+// from the BLE transport so it can be host-tested. The transport owns an array
+// of these slots (one in-flight record per rec_id) and reconstructs the pool
+// record once a slot reports COMPLETE; this struct owns only the staging buffer
+// and the per-fragment bookkeeping. Fragments are AG_MESH_FRAG_BODY bytes each.
+typedef struct {
+    uint16_t rec_id;
+    uint8_t  frag_total;        // 1..AG_MESH_FRAG_MAX
+    uint8_t  have_mask;         // bit i set once fragment i has landed
+    uint8_t  payload[31];       // staged reassembled payload
+    uint8_t  payload_len;       // high-water mark of staged bytes
+    bool     used;              // slot occupied by an in-flight record
+} ag_reasm_t;
+
+// Verdict of folding one fragment into a slot.
+typedef enum {
+    AG_REASM_PARTIAL = 0,   // accepted; record not yet complete
+    AG_REASM_COMPLETE,      // accepted; all fragments now present
+    AG_REASM_BADFRAG,       // malformed fragment header — dropped, no state change
+} ag_reasm_verdict_t;
+
+// Clear a slot to the empty state.
+void ag_reasm_reset(ag_reasm_t *r);
+
+// Pick a reassembly slot for rec_id from a caller-owned array: an existing slot
+// for this rec_id, else a free slot, else a deterministic overwrite victim
+// (rec_id % cap) under slot pressure. Returns the slot index (0..cap-1); never
+// fails for cap > 0. cap == 0 returns 0.
+int ag_reasm_slot_for(ag_reasm_t *slots, int cap, uint16_t rec_id);
+
+// Fold one fragment into slot `r`. frag_byte packs (frag_index<<4 | frag_total),
+// matching the wire. Guards frag_total==0 and frag_index>=frag_total (both
+// BADFRAG). A slot holding a different rec_id (or an unused slot) is reset to
+// this rec_id first. Stages body[0..body_len) at frag_index*AG_MESH_FRAG_BODY
+// (bounded to the staging buffer). Returns COMPLETE once every fragment is in.
+ag_reasm_verdict_t ag_reasm_add(ag_reasm_t *r, uint16_t rec_id, uint8_t frag_byte,
+                                const uint8_t *body, uint8_t body_len);
 
 #ifdef __cplusplus
 }
