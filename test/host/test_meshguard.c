@@ -36,6 +36,43 @@ int main(void)
         CHECK(hops >= 1);
     }
 
+    // (1b) wire-TTL clamp: the hop-TTL is a single attacker-controllable byte
+    //      (0..255), but diffusion must stay bounded to AG_TTL_INIT hops. A frame
+    //      declaring an inflated ttl (e.g. 255) must be clamped to the ceiling on
+    //      acceptance, never stored above it — otherwise one crafted frame could
+    //      amplify across far more than AG_TTL_INIT hops.
+    {
+        ag_seen_t seen;
+        ag_seen_init(&seen, ids, stamps, 64);
+        uint8_t out = 0xFF;
+        ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, /*rec_id*/0x2345,
+            /*inbound_ttl*/255, /*origin*/0xAAAA, /*self*/0x1,
+            /*in_pool*/false, /*pool_ttl*/0, &out);
+        CHECK(v == AG_MESH_ACCEPT);
+        // stored ttl = clamp(255, TTL_INIT) - 1 = TTL_INIT - 1.
+        CHECK_MSG(out == (uint8_t)(AG_TTL_INIT - 1),
+                  "inflated wire ttl=255 stored as %u (must clamp to TTL_INIT-1=%d)",
+                  out, AG_TTL_INIT - 1);
+        // And the clamp must bound the in-pool refresh path too. Use a pool_ttl
+        // ABOVE the ceiling so the clamp is the ONLY thing that bounds the result:
+        // without the clamp, refresh-lower would store min(255, pool_ttl) =
+        // pool_ttl (> AG_TTL_INIT); with the clamp, inbound is capped to
+        // AG_TTL_INIT first, so the stored ttl is min(AG_TTL_INIT, pool_ttl) =
+        // AG_TTL_INIT. (pool_ttl can only exceed the ceiling if a prior bug stored
+        // it there; the clamp is the backstop that re-bounds it on refresh.) This
+        // assertion FAILS if the clamp is removed — the weaker pool_ttl < ceiling
+        // case would pass either way and does not exercise the clamp.
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        uint8_t out2 = 0xFF;
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x2346, /*inbound*/255,
+            0x1, 0x2, /*in_pool*/true, /*pool_ttl*/200, &out2);
+        CHECK(v2 == AG_MESH_REFRESH_LOWER);
+        CHECK_MSG(out2 == AG_TTL_INIT,
+                  "inflated ttl refresh stored %u (clamp must bound it to "
+                  "TTL_INIT=%d, not min(255,pool_ttl))", out2, AG_TTL_INIT);
+    }
+
     // (2) origin pinning: a node never absorbs a record it air-captured.
     {
         ag_seen_t seen;

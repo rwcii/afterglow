@@ -66,6 +66,14 @@ ag_mesh_verdict_t ag_mesh_evaluate(ag_seen_t *s,
 {
     if (out_ttl) *out_ttl = 0;
 
+    // Clamp the wire TTL to the design ceiling FIRST. The hop-TTL field is a
+    // single attacker-controllable byte (0..255), but diffusion is bounded to
+    // AG_TTL_INIT hops by design. A crafted frame declaring ttl=255 must not be
+    // able to store a hop_ttl above the ceiling and amplify across the mesh, so
+    // cap it here independently of the carry-gate invariants downstream — this
+    // is the hard bound, not a soft hint.
+    if (inbound_ttl > AG_TTL_INIT) inbound_ttl = AG_TTL_INIT;
+
     // Guard: TTL exhausted on the wire. ttl==0 records are replay-only and are
     // never re-meshed.
     if (inbound_ttl == 0) {

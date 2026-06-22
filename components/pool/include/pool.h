@@ -94,6 +94,13 @@ uint32_t pool_node_id(void);
 // (rec_id is NOT overloaded as a sentinel: 0 is a legitimate hash output.)
 int pool_insert_record(const ag_beacon_record_t *rec, bool trust_rec_id);
 
+// Find a live record by device identity (addr_type + original observed
+// address), the same key the pool dedups local captures on. Returns the slot
+// index, or -1 if no live record matches. Used by the mesh absorb path to
+// merge-vs-insert on identity rather than on a wire rec_id that can diverge
+// from the locally-recomputed one. Valid only until the next sweep/admit.
+int pool_find_identity(uint8_t addr_type, const uint8_t orig_addr[6]);
+
 // Current number of live records.
 uint16_t pool_count(void);
 
