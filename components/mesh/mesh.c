@@ -357,8 +357,24 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
         (void)idx;
 #endif
         ESP_LOGI(TAG, "absorbed rec_id %04x (ttl->%u)", rec->rec_id, out_ttl);
+    } else if (v == AG_MESH_REFRESH_LOWER) {
+        // The record is already live; re-delivery may only LOWER its remaining
+        // hop reach, never raise it. ag_mesh_evaluate computed out_ttl =
+        // min(inbound, pool_ttl); apply it to the live record so the documented
+        // "refresh to the LOWER ttl" amplification guard actually takes effect
+        // (previously out_ttl was computed and discarded, leaving hop_ttl at its
+        // higher prior value). Guard with `<` so this can only ever decrease the
+        // stored ttl. `existing` is the slot pool_find_identity returned above and
+        // nothing mutates the pool between then and here (single capture task).
+        if (existing >= 0) {
+            ag_beacon_record_t *p = pool_record_mut((uint16_t)existing);
+            if (p && out_ttl < p->hop_ttl) {
+                p->hop_ttl = out_ttl;
+                ESP_LOGI(TAG, "refreshed rec_id %04x ttl->%u", rec->rec_id, out_ttl);
+            }
+        }
     }
-    // REFRESH_LOWER / DROP_* require no absorption.
+    // DROP_* require no absorption.
 }
 
 // Record a peer contact; return true if the per-peer cooldown has elapsed (so

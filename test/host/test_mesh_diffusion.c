@@ -218,5 +218,45 @@ int main(void)
                       "flood-x10: node %d accepted %d times", i, g_nodes[i].accepts);
     }
 
+    // Refresh-lower APPLIES: a record live in the pool, re-delivered with a lower
+    // inbound ttl, must have its stored ttl actually reduced — not just have the
+    // lower value computed and discarded. This mirrors mesh_absorb_inbound's
+    // REFRESH_LOWER branch (pool_record_mut -> hop_ttl = out_ttl). Model the live
+    // record's stored ttl and assert the re-delivery lowers it and never raises it.
+    {
+        ag_seen_t seen; static uint16_t s_ids[16]; static uint32_t s_st[16];
+        ag_seen_init(&seen, s_ids, s_st, 16);
+        const uint32_t origin = 0xAAAA, self = 0xBBBB;
+        const uint16_t rid = 0x1357;
+        uint8_t stored = 0, out = 0;
+
+        // First delivery: ACCEPT, stored ttl = TTL_INIT - 1.
+        ag_mesh_verdict_t v0 = ag_mesh_evaluate(&seen, rid, AG_TTL_INIT, origin,
+                                                self, false, 0, &out);
+        CHECK(v0 == AG_MESH_ACCEPT);
+        stored = out;
+        CHECK_MSG(stored == AG_TTL_INIT - 1, "accept stored %u", stored);
+
+        // Re-delivery with a LOWER inbound ttl (1) than what's stored: verdict
+        // REFRESH_LOWER, and applying out lowers the stored ttl to 1.
+        uint8_t before = stored;
+        ag_mesh_verdict_t v1 = ag_mesh_evaluate(&seen, rid, 1, origin, self,
+                                                true, stored, &out);
+        CHECK(v1 == AG_MESH_REFRESH_LOWER);
+        if (out < stored) stored = out;   // the caller's write-back (mesh.c)
+        CHECK_MSG(stored == 1, "refresh-lower did not reduce stored ttl: %u (was %u)",
+                  stored, before);
+        CHECK_MSG(stored < before, "refresh did not lower reach");
+
+        // Re-delivery with a HIGHER inbound ttl must NOT raise the stored ttl.
+        before = stored;
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen, rid, AG_TTL_INIT, origin,
+                                                self, true, stored, &out);
+        CHECK(v2 == AG_MESH_REFRESH_LOWER);
+        if (out < stored) stored = out;
+        CHECK_MSG(stored == before, "refresh RAISED stored ttl from %u to %u",
+                  before, stored);
+    }
+
     TEST_SUMMARY();
 }
