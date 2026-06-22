@@ -10,7 +10,10 @@ banners land inside the capture window.
 import re
 import time
 
-import serial
+# NOTE: pyserial is imported lazily inside Board.__init__ (not at module load) so
+# that host-only consumers of the rig package — e.g. the detector-port parity
+# test, which only needs rig.separability — can import `rig` without pyserial
+# installed. Only actually opening a board (talking to hardware) requires it.
 
 
 BAUD = 115200
@@ -25,6 +28,7 @@ class Board:
     """
 
     def __init__(self, port, settle=2.0, baud=BAUD):
+        import serial  # lazy: only needed to actually open a board (see top note)
         s = serial.Serial()
         s.port = port
         s.baudrate = baud
