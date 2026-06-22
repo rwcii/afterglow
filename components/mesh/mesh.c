@@ -43,10 +43,11 @@ static ag_seen_t s_seen;
 #define MESH_FRAG_REPEAT 2
 
 // Contact table: peers seen recently, with a per-peer cooldown so we don't
-// re-transfer to the same node on every HELLO.
+// re-transfer to the same node on every HELLO. The slot type and the cooldown/
+// eviction decision are the portable, host-tested ag_contact_* logic; this
+// wrapper just owns the storage and the clock.
 #define MESH_CONTACTS 8
-typedef struct { uint32_t peer_lo24; uint32_t last_xfer_ms; bool used; } mesh_contact_t;
-static mesh_contact_t s_contacts[MESH_CONTACTS];
+static ag_contact_t s_contacts[MESH_CONTACTS];
 
 // Fragment reassembly buffer: a single in-flight record per rec_id slot.
 #define MESH_REASM 8
@@ -61,6 +62,13 @@ static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 esp_err_t mesh_init(void)
 {
     afterglow_config_load(&s_cfg);
+#ifdef AG_ONAIR_TEST
+    // On-air test hook (compiled in only for the tools/onair-test rig): mesh.c
+    // keeps its own config copy, so force-enable it here too — the rig drives the
+    // HELLO exchange + contact-table cooldown through mesh_try_consume/mesh_tick,
+    // both of which gate on this copy. Mesh still ships disabled in production.
+    s_cfg.mesh_enabled = true;
+#endif
     s_node_id = pool_node_id();   // share the pool's per-boot NodeID for origin
     ag_prng_seed(&s_rng, ag_rand_u32() | ((uint64_t)ag_rand_u32() << 32));
     ag_seen_init(&s_seen, s_seen_ids, s_seen_stamps, MESH_SEEN_CAP);
@@ -177,23 +185,12 @@ void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
 }
 
 // Record a peer contact; return true if the per-peer cooldown has elapsed (so
-// the caller should transfer to it now). Evicts the stalest slot when full.
+// the caller should transfer to it now). Thin wrapper over the host-tested
+// contact-table logic; the storage and clock live here.
 static bool contact_seen(uint32_t peer_lo24, uint32_t t)
 {
-    int slot = -1, oldest = 0;
-    for (int i = 0; i < MESH_CONTACTS; i++) {
-        if (s_contacts[i].used && s_contacts[i].peer_lo24 == peer_lo24) { slot = i; break; }
-        if (!s_contacts[i].used) { slot = i; break; }
-        if (s_contacts[i].last_xfer_ms < s_contacts[oldest].last_xfer_ms) oldest = i;
-    }
-    if (slot < 0) slot = oldest;
-    mesh_contact_t *c = &s_contacts[slot];
-    bool fresh = c->used && c->peer_lo24 == peer_lo24;
-    if (fresh && (t - c->last_xfer_ms) < s_cfg.mesh_contact_cooldown_ms) {
-        return false;  // still cooling down for this peer
-    }
-    c->used = true; c->peer_lo24 = peer_lo24; c->last_xfer_ms = t;
-    return true;
+    return ag_contact_should_transfer(s_contacts, MESH_CONTACTS, peer_lo24, t,
+                                      s_cfg.mesh_contact_cooldown_ms);
 }
 
 // Accept a DATA fragment; on the last missing fragment, reassemble and absorb.
@@ -260,10 +257,28 @@ bool mesh_try_consume(const ag_capture_t *cap)
     if (type == MESH_TYPE_HELLO && ad_len >= 7) {
         uint32_t peer = (uint32_t)ad[5] | ((uint32_t)ad[6] << 8) | ((uint32_t)ad[7] << 16);
         if (peer == (s_node_id & 0xFFFFFF)) return true;   // our own HELLO
+#ifdef AG_ONAIR_TEST
+        // On-air test hook (compiled in only for the tools/onair-test rig): emit
+        // ground-truth discovery lines so the host harness can assert each node
+        // discovers the other's NodeID and that a re-HELLO inside the cooldown is
+        // gated. self/peer are NodeID low-24 (matches the HELLO mfg-data field).
+        ESP_LOGI(TAG, "ONAIR mesh hello-rx self=%06x peer=%06x",
+                 (unsigned)(s_node_id & 0xFFFFFF), (unsigned)peer);
+#endif
         if (contact_seen(peer, t)) {
             ESP_LOGI(TAG, "HELLO from peer %06x -> transferring", (unsigned)peer);
+#ifdef AG_ONAIR_TEST
+            ESP_LOGI(TAG, "ONAIR mesh peer-discovered self=%06x peer=%06x",
+                     (unsigned)(s_node_id & 0xFFFFFF), (unsigned)peer);
+#endif
             transfer_to_peer((uint16_t)(peer & 0xFFFF));
         }
+#ifdef AG_ONAIR_TEST
+        else {
+            ESP_LOGI(TAG, "ONAIR mesh cooldown-gated self=%06x peer=%06x",
+                     (unsigned)(s_node_id & 0xFFFFFF), (unsigned)peer);
+        }
+#endif
         return true;
     }
     if (type == MESH_TYPE_DATA && ad_len >= 8) {
