@@ -10,6 +10,7 @@
 #include "afterglow_config.h"
 #include "entropy.h"
 #include "ag_core/ag_meshguard.h" // portable TTL/origin/seen-set guards (host-tested)
+#include "ag_core/ag_eligible.h"  // AG_ADV_UNKNOWN — fail-closed adv_kind default
 #include "ag_core/ag_prng.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -266,26 +267,26 @@ static void transfer_to_peer(uint16_t peer_lo16)
                                             peer_lo16,
                                             s_cfg.mesh_transfer_fraction,
                                             cap, &s_rng, sel, out_max);
-    // Selection returns pool INDICES; emission must not re-dereference a stale
-    // index. What makes this safe is that no eviction sweep runs between select
-    // and emit: transfer_to_peer is driven from the capture path (mesh_try_consume
-    // on a HELLO) while pool_evict_sweep runs on the app-loop task, and nothing in
-    // this flow mutates the pool. On top of that invariant, copy each selected
-    // record into a local before emitting from it, so we never hand emit_record a
-    // pool pointer that the contract says is valid only until the next sweep.
-    // Copying per record (one ~sizeof(record) stack local, not a 32-wide array)
-    // keeps this off the small NimBLE host-task stack. NOTE: the per-record copy
-    // closes only the retained-pointer hazard; if a sweep could ever run
-    // concurrently it would shift indices in sel[] and we would copy the WRONG
-    // record — so the single-threaded-wrt-sweeps invariant above is the load-
-    // bearing guarantee, not the copy. Revisit (snapshot all indices up front, or
-    // a freeze/lock) before moving transfer off the capture task.
-    uint8_t emitted = 0;
-    for (uint8_t k = 0; k < sent; k++) {
+    // Selection returns pool INDICES, which are valid only until the next sweep.
+    // Snapshot the selected records into a private buffer IMMEDIATELY, while the
+    // indices are still fresh, then emit from the snapshot. This makes the
+    // resolve-index step and the emit step independent of each other: even if an
+    // eviction sweep compacts the slab between this snapshot loop and the emit
+    // loop (e.g. transfer is ever moved off the single capture task), we emit the
+    // records we actually selected, never a record a shifted index now points at.
+    // The snapshot is a file-static scratch buffer (not a 32-wide stack array) to
+    // keep it off the small NimBLE host-task stack; transfer_to_peer runs only on
+    // the capture task, so a single shared scratch buffer is safe.
+    static ag_beacon_record_t s_xfer_snap[MESH_SELECT_MAX];
+    uint8_t snapped = 0;
+    for (uint8_t k = 0; k < sent && snapped < MESH_SELECT_MAX; k++) {
         const ag_beacon_record_t *r = pool_record_at(sel[k]);
         if (!r) continue;
-        ag_beacon_record_t snap = *r;   // detach from the pool slab before emit
-        emit_record(&snap);
+        s_xfer_snap[snapped++] = *r;   // detach from the pool slab before emit
+    }
+    uint8_t emitted = 0;
+    for (uint8_t k = 0; k < snapped; k++) {
+        emit_record(&s_xfer_snap[k]);
         emitted++;
     }
     if (emitted) ESP_LOGI(TAG, "transferred %u records to peer %04x", emitted, peer_lo16);
@@ -297,12 +298,20 @@ static void transfer_to_peer(uint16_t peer_lo16)
 void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
                          uint32_t origin_node)
 {
+    // Existence check keyed on DEVICE IDENTITY (addr_type + orig_addr), the same
+    // key local capture dedups on — NOT on the wire rec_id. The wire rec_id is
+    // frozen at the sender's first sighting while a locally-recomputed id tracks
+    // the latest payload, so the two can diverge for one device; keying on rec_id
+    // would miss an existing slot and let ACCEPT append a SECOND record for the
+    // same device, defeating dedup. With identity keying, ag_mesh_evaluate returns
+    // ACCEPT only when no slot for this device exists, so the insert below is
+    // always a genuine first-absorption (no duplicate slot).
     bool in_pool = false;
     uint8_t pool_ttl = 0;
-    uint16_t n = pool_count();
-    for (uint16_t i = 0; i < n; i++) {
-        const ag_beacon_record_t *p = pool_record_at(i);
-        if (p && p->rec_id == rec->rec_id) { in_pool = true; pool_ttl = p->hop_ttl; break; }
+    int existing = pool_find_identity(rec->addr_type, rec->orig_addr);
+    if (existing >= 0) {
+        const ag_beacon_record_t *p = pool_record_at((uint16_t)existing);
+        if (p) { in_pool = true; pool_ttl = p->hop_ttl; }
     }
     uint8_t out_ttl = 0;
     // origin_node arrives as the wire origin_lo24 (low-24 of the first
@@ -381,9 +390,26 @@ static void on_data_fragment(uint8_t ttl, uint8_t frag_byte, uint16_t rec_id,
 #ifdef AG_ONAIR_TEST
     ESP_LOGI(TAG, "ONAIR mesh reasm-complete rec=%04x", rec_id);
 #endif
+    // A completed record must carry at least the 6-byte AdvA prefix the identity
+    // is reconstructed from. A crafted DATA frame with ad_len == MESH_DATA_PRE
+    // reassembles to a zero-length body (body != NULL, off+0 within bounds) and
+    // would otherwise complete into an all-zero junk record (orig_addr
+    // 00:00:00:00:00:00). Reject anything too short to carry an identity rather
+    // than absorb a bogus record into the pool.
+    if (rb->payload_len < 6) {
+        ag_reasm_reset(rb);   // free the slot; nothing to absorb
+        return;
+    }
+
     ag_beacon_record_t rec = {0};
     rec.proto = AG_PROTO_BLE;
     rec.cls = AG_CLASS_TENTATIVE;
+    // The DATA wire format carries no adv_kind; a zeroed field would be
+    // AG_ADV_NONCONN_NONSCAN (the eligible, fail-OPEN value). Set the fail-closed
+    // AG_ADV_UNKNOWN sentinel so an absorbed record can never be treated as
+    // broadcast-only (and thus replay-eligible) without a genuine local
+    // observation, which ag_pool_admit's stickiest-unsafe-wins merge supplies.
+    rec.adv_kind = AG_ADV_UNKNOWN;
     rec.payload_len = rb->payload_len;
     memcpy(rec.payload, rb->payload, rb->payload_len);
     // Reconstruct identity from the payload prefix (AdvA was the first 6 B of the
@@ -391,6 +417,14 @@ static void on_data_fragment(uint8_t ttl, uint8_t frag_byte, uint16_t rec_id,
     // the wire, so the pool's rec_id recompute reproduces the wire rec_id the
     // seen-set deduped on.
     memcpy(rec.orig_addr, rb->payload, 6);
+    // Reject an all-zero AdvA: not a real device identity, and it collapses every
+    // such crafted frame onto one pool slot. (A genuine all-zero AdvA is invalid
+    // per the BLE spec, so this rejects only malformed/crafted input.)
+    static const uint8_t zero_addr[6] = {0};
+    if (memcmp(rec.orig_addr, zero_addr, 6) == 0) {
+        ag_reasm_reset(rb);
+        return;
+    }
     rec.addr_type = addr_type;
     rec.rec_id = rec_id;
     ag_reasm_reset(rb);   // free the slot

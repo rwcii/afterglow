@@ -113,6 +113,13 @@ void pool_evict_sweep(void)
     if (evicted) ESP_LOGD(TAG, "evicted %u (live=%u)", evicted, s_count);
 }
 
+int pool_find_identity(uint8_t addr_type, const uint8_t orig_addr[6])
+{
+    // Identity-keyed lookup over the compacted slab. payload/payload_len are not
+    // part of the identity match (see ag_pool_find), so pass NULL/0.
+    return ag_pool_find(s_slab, s_count, addr_type, orig_addr, NULL, 0);
+}
+
 uint16_t pool_count(void) { return s_count; }
 uint16_t pool_capacity(void) { return s_capacity; }
 uint32_t pool_node_id(void) { return s_node_id; }
