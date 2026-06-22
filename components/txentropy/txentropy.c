@@ -5,7 +5,6 @@
 #include "pool.h"               // pool_count / pool_record_at for ambient sampling
 #include "ag_core/ag_txwalk.h"  // portable walk math (host-tested)
 #include "esp_log.h"
-#include <math.h>
 
 static const char *TAG = "txentropy";
 
@@ -44,29 +43,34 @@ int8_t txentropy_level_for_ghost(ag_beacon_record_t *ghost, ag_proto_t proto)
 
 void txentropy_update_ambient(void)
 {
-    // Sample the std-dev of rssi_ewma across live pool records and set the walk
-    // step toward it, so the synthesized signal variation tracks the room rather
-    // than a fixed pedestrian figure. Fall back to the prior when too sparse.
+    // Drive the walk step from the average per-source TEMPORAL RSSI variability
+    // — how much real sources actually move over time — not the spatial
+    // spread between sources sitting at different distances. The two diverge in
+    // the case that matters most: a quiet room of steady devices at varied
+    // ranges has a large spatial spread but near-zero temporal motion, and
+    // ghosts should stay calm there, not walk hard. Averaging rssi_dev_ewma
+    // keeps sigma LOW in that case. Fall back to the pedestrian prior when too
+    // few real sources are observed.
     uint16_t n = pool_count();
     if (n < 6) { s_ambient_sigma = 2.0f; return; }
 
-    double sum = 0.0, sumsq = 0.0;
+    double sum_dev = 0.0;
     uint16_t used = 0;
     for (uint16_t i = 0; i < n; i++) {
         const ag_beacon_record_t *r = pool_record_at(i);
         if (!r) continue;
-        double v = (double)r->rssi_ewma;
-        sum += v; sumsq += v * v; used++;
+        sum_dev += (double)r->rssi_dev_ewma;
+        used++;
     }
     if (used < 6) { s_ambient_sigma = 2.0f; return; }
-    double mean = sum / used;
-    double var = sumsq / used - mean * mean;
-    double sd = var > 0.0 ? sqrt(var) : 0.0;
-
-    // Map the observed spread to a per-step sigma in a sane band [0.8, 4.0] dB.
-    float sigma = (float)(sd * 0.3);
-    if (sigma < 0.8f) sigma = 0.8f;
-    if (sigma > 4.0f) sigma = 4.0f;
-    s_ambient_sigma = sigma;
-    ESP_LOGD(TAG, "ambient sigma=%.2f from %u sources", s_ambient_sigma, used);
+    float ambient_dev = (float)(sum_dev / used);
+    s_ambient_sigma = ag_txwalk_ambient_sigma(ambient_dev);
+    ESP_LOGD(TAG, "ambient sigma=%.2f from %u sources (mean dev=%.2f dB)",
+             s_ambient_sigma, used, ambient_dev);
+#ifdef AG_ONAIR_TEST
+    // Test-only ground-truth hook for the on-air rig: the derived sigma and its
+    // input. Mirrors the other ONAIR hooks; production path never compiles this.
+    ESP_LOGI(TAG, "ONAIR ambient sigma=%.3f used=%u dev=%.3f",
+             s_ambient_sigma, used, ambient_dev);
+#endif
 }

@@ -111,6 +111,7 @@ void ag_life_make_successor(const ag_beacon_record_t *parent,
     child->p_center = parent->p_center;
     child->rssi_ewma = parent->rssi_ewma;
     child->rssi_last = parent->rssi_last;
+    child->rssi_dev_ewma = parent->rssi_dev_ewma;  // temporal-variance continuity
 
     // INHERIT the lineage TTL basis: first_seen_ms / base_ttl_s / ttl_cap_s /
     // replay_deadline_ms carry over from the parent (already copied by the

@@ -42,6 +42,11 @@ float ag_txwalk_roll_center(ag_prng_t *rng, int proto);
 // Advance one walk update. Returns the new p_virt (also stored via *p_virt).
 float ag_txwalk_step(const ag_txwalk_params_t *prm, ag_prng_t *rng, float *p_virt);
 
+// Map an observed ambient RSSI deviation (dB) to a per-step walk sigma, held in
+// the documented [0.8, 4.0] dB band. The input should be a TEMPORAL
+// deviation (how much sources move over time), not a cross-source spatial spread.
+float ag_txwalk_ambient_sigma(float ambient_dev_db);
+
 // Quantize a virtual power to the nearest level on a discrete hardware ladder.
 // `ladder` is an ascending array of `n` dBm values. Returns the chosen index.
 int ag_txwalk_quantize(const float *ladder, int n, float p_virt);

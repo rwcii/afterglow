@@ -88,5 +88,27 @@ int main(void)
         }
     }
 
+    // (6) ambient-sigma mapping: 0.3x the observed deviation, clamped to
+    // [0.8, 4.0]. The headline case is "quiet room" → near-zero observed
+    // deviation must NOT produce a large walk: it floors at 0.8, not the
+    // pedestrian 2.0, and certainly not the ceiling.
+    {
+        CHECK_MSG(ag_txwalk_ambient_sigma(0.0f) == 0.8f,
+                  "quiet room (dev=0) should floor sigma at 0.8, got %.3f",
+                  ag_txwalk_ambient_sigma(0.0f));
+        CHECK(ag_txwalk_ambient_sigma(1.0f) == 0.8f);   // 0.3 < 0.8 → floor
+        CHECK(fabs(ag_txwalk_ambient_sigma(10.0f) - 3.0f) < 1e-4f); // 0.3*10
+        CHECK_MSG(ag_txwalk_ambient_sigma(100.0f) == 4.0f,
+                  "huge dev should clamp to ceiling 4.0, got %.3f",
+                  ag_txwalk_ambient_sigma(100.0f));
+        // monotone non-decreasing across the band.
+        float prev = -1.0f;
+        for (float d = 0.0f; d <= 30.0f; d += 0.5f) {
+            float s = ag_txwalk_ambient_sigma(d);
+            CHECK(s >= prev - 1e-6f);
+            prev = s;
+        }
+    }
+
     TEST_SUMMARY();
 }
