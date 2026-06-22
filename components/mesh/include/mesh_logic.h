@@ -1,12 +1,15 @@
 // mesh_logic.h — portable mesh transfer math (no BLE radio / hardware deps).
 //
-// The hardware-coupled mesh.c owns the connectionless adv/scan bursts, the
-// contact table and the FreeRTOS tick; the pure transfer math lives here so it
-// can be host-tested against a plain array. Three pieces:
+// The hardware-coupled mesh.c owns the connectionless adv/scan bursts and the
+// FreeRTOS tick; the pure transfer math lives here so it can be host-tested
+// against a plain array. Pieces:
 //   - carry gate: which live records this node may hand to a peer at all;
 //   - subset select: a recency-weighted random pick of ~fraction of the
 //     carry-eligible records, capped, excluding the peer's own-origin records;
-//   - fragmentation count: how many 4-bit-indexed body fragments a payload needs.
+//   - fragmentation count: how many 4-bit-indexed body fragments a payload needs;
+//   - contact table: discovery bookkeeping + the per-peer cooldown gate that
+//     decides whether a HELLO should trigger a transfer (mesh.c keeps the table
+//     storage and the clock; the decision lives here).
 // Inbound gating stays in ag_mesh_evaluate (ag_meshguard.h) — not reimplemented.
 #pragma once
 
@@ -23,6 +26,33 @@ extern "C" {
 // frag_index / frag_total are 4-bit fields on the wire, so a record can span at
 // most this many body fragments.
 #define AG_MESH_FRAG_MAX 15
+
+// One slot in the contact table: a peer discovered on air (low-24 of its
+// NodeID) and the timestamp of the last transfer we made to it. `used` marks
+// the slot occupied. mesh.c owns an array of these (sized by MESH_CONTACTS).
+typedef struct {
+    uint32_t peer_lo24;     // low 24 bits of the discovered peer's NodeID
+    uint32_t last_xfer_ms;  // monotonic clock at the last transfer to this peer
+    bool     used;          // slot occupied
+} ag_contact_t;
+
+// Record a peer contact in the table and decide whether to transfer to it now.
+//
+// Returns true when the caller should transfer (a freshly discovered peer, or a
+// known peer whose per-peer cooldown has elapsed) and updates the slot's
+// last_xfer_ms to now_ms; returns false while the peer is still cooling down
+// (the slot is left untouched). When the table is full and the peer is new, the
+// stalest slot (smallest last_xfer_ms) is evicted to make room.
+//
+//   table     : contact-table storage owned by the caller.
+//   cap        : number of slots in `table`.
+//   peer_lo24  : the discovered peer's NodeID low-24.
+//   now_ms     : current monotonic clock (ms). A now_ms < last_xfer_ms wrap is
+//                treated as "cooldown elapsed" (never stuck cooling down).
+//   cooldown_ms: minimum gap between transfers to the same peer.
+bool ag_contact_should_transfer(ag_contact_t *table, uint8_t cap,
+                                uint32_t peer_lo24, uint32_t now_ms,
+                                uint32_t cooldown_ms);
 
 // May this record be handed to a peer? Stricter than replay eligibility: the
 // record must be replay-eligible AND have been seen on >= 2 sweeps (a multi-

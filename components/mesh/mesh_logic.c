@@ -110,3 +110,37 @@ uint8_t ag_mesh_frag_count(uint8_t payload_len, uint8_t body_bytes)
     if (n > AG_MESH_FRAG_MAX) n = AG_MESH_FRAG_MAX;
     return (uint8_t)n;
 }
+
+bool ag_contact_should_transfer(ag_contact_t *table, uint8_t cap,
+                                uint32_t peer_lo24, uint32_t now_ms,
+                                uint32_t cooldown_ms)
+{
+    if (table == NULL || cap == 0) return false;
+
+    // Find this peer's slot; else the first free slot; else remember the stalest
+    // (smallest last_xfer_ms) to evict. Mirrors the array walk mesh.c used.
+    int slot = -1, oldest = 0;
+    for (uint8_t i = 0; i < cap; i++) {
+        if (table[i].used && table[i].peer_lo24 == peer_lo24) { slot = i; break; }
+        if (!table[i].used) { slot = (int)i; break; }
+        if (table[i].last_xfer_ms < table[oldest].last_xfer_ms) oldest = (int)i;
+    }
+    if (slot < 0) slot = oldest;   // table full of distinct peers: evict stalest
+
+    ag_contact_t *c = &table[slot];
+    bool known = c->used && c->peer_lo24 == peer_lo24;
+    if (known) {
+        // Per-peer cooldown. Compute elapsed without unsigned wrap: a clock that
+        // appears to run backwards (now < last) means a wrap/reset, which we
+        // treat as cooldown-elapsed rather than letting the subtraction wrap to
+        // a huge "still cooling down" value.
+        uint32_t elapsed = (now_ms >= c->last_xfer_ms)
+                               ? (now_ms - c->last_xfer_ms) : cooldown_ms;
+        if (elapsed < cooldown_ms) return false;   // still cooling down
+    }
+
+    c->used = true;
+    c->peer_lo24 = peer_lo24;
+    c->last_xfer_ms = now_ms;
+    return true;
+}

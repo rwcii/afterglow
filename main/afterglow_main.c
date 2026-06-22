@@ -43,6 +43,14 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(afterglow_config_load(&s_cfg));
+#ifdef AG_ONAIR_TEST
+    // On-air test hook (compiled in only for the tools/onair-test rig, never in a
+    // normal build): force-enable the mesh so the discovery rig can exercise the
+    // HELLO exchange + contact-table cooldown on real hardware. Mesh still ships
+    // disabled in production (mesh_enabled defaults false).
+    s_cfg.mesh_enabled = true;
+    ESP_LOGI(TAG, "ONAIR mesh force-enabled for the on-air discovery rig");
+#endif
     ag_entropy_init();
 
     // The Wi-Fi stack posts events to the default event loop; without it the

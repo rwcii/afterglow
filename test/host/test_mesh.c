@@ -141,5 +141,110 @@ int main(void)
     // body_bytes==0 guarded to 1 (no div-by-zero), then clamped.
     CHECK(ag_mesh_frag_count(10, 0) == 10);
 
+    // --- contact table + per-peer cooldown ---------------------------------
+    // The cooldown/eviction decision behind mesh.c's contact_seen(): a HELLO
+    // from a peer triggers a transfer on first contact, then is gated until the
+    // per-peer cooldown elapses; the table evicts the stalest peer when full.
+    const uint32_t COOLDOWN = 120000;   // ms (config default, clamped [60s,180s])
+
+    // (10) first contact -> transfer; re-contact within cooldown -> gated;
+    //      after the cooldown elapses -> transfer again.
+    {
+        ag_contact_t tbl[8];
+        memset(tbl, 0, sizeof(tbl));
+        const uint32_t P = 0xABCDEF;
+        CHECK_MSG(ag_contact_should_transfer(tbl, 8, P, 1000, COOLDOWN),
+                  "first contact must transfer");
+        // re-contact partway through the cooldown -> gated (no transfer).
+        CHECK_MSG(!ag_contact_should_transfer(tbl, 8, P, 1000 + COOLDOWN / 2, COOLDOWN),
+                  "re-contact inside cooldown must be gated");
+        // exactly at the cooldown boundary -> elapsed, transfer.
+        CHECK_MSG(ag_contact_should_transfer(tbl, 8, P, 1000 + COOLDOWN, COOLDOWN),
+                  "contact at cooldown boundary must transfer");
+    }
+
+    // (11) a gated re-contact must NOT slide the cooldown window forward (the
+    //      slot's last-transfer time is left untouched while cooling down).
+    {
+        ag_contact_t tbl[8];
+        memset(tbl, 0, sizeof(tbl));
+        const uint32_t P = 0x010203;
+        CHECK(ag_contact_should_transfer(tbl, 8, P, 0, COOLDOWN));
+        // two gated re-contacts inside the window...
+        CHECK(!ag_contact_should_transfer(tbl, 8, P, 40000, COOLDOWN));
+        CHECK(!ag_contact_should_transfer(tbl, 8, P, 80000, COOLDOWN));
+        // ...still measured from the ORIGINAL transfer: at t=COOLDOWN it fires.
+        CHECK_MSG(ag_contact_should_transfer(tbl, 8, P, COOLDOWN, COOLDOWN),
+                  "gated re-contacts must not push the cooldown window forward");
+    }
+
+    // (12) own-HELLO never reaches the contact table: mesh_try_consume drops a
+    //      HELLO whose peer-id equals our own NodeID low-24 before calling the
+    //      contact logic, so the table is only ever asked about foreign peers.
+    //      Asserting the gate's contract here: a distinct peer is always a fresh
+    //      first contact (the own-HELLO is filtered upstream, never inserted).
+    {
+        ag_contact_t tbl[8];
+        memset(tbl, 0, sizeof(tbl));
+        const uint32_t SELF24 = 0x0F0F0F;
+        const uint32_t PEER24 = 0x0E0E0E;
+        // The peer's HELLO is a first contact -> transfer.
+        CHECK(ag_contact_should_transfer(tbl, 8, PEER24, 5000, COOLDOWN));
+        // Our own id is never passed to the table; only PEER24 occupies a slot.
+        int used = 0, has_self = 0;
+        for (int i = 0; i < 8; i++) {
+            if (tbl[i].used) used++;
+            if (tbl[i].used && tbl[i].peer_lo24 == SELF24) has_self = 1;
+        }
+        CHECK_MSG(used == 1, "exactly one slot used, got %d", used);
+        CHECK_MSG(!has_self, "own NodeID must never occupy a contact slot");
+    }
+
+    // (13) a 9th distinct peer evicts the stalest slot (LRU by last-transfer).
+    {
+        ag_contact_t tbl[8];
+        memset(tbl, 0, sizeof(tbl));
+        // Fill all 8 slots with distinct peers at increasing timestamps; peer
+        // 0x100 is the stalest (oldest last-transfer).
+        for (int i = 0; i < 8; i++) {
+            uint32_t peer = 0x100u + (uint32_t)i;
+            CHECK(ag_contact_should_transfer(tbl, 8, peer, 1000u + (uint32_t)i * 1000u, COOLDOWN));
+        }
+        // A 9th distinct peer: table full -> stalest (0x100) evicted.
+        const uint32_t NEW = 0x999;
+        CHECK_MSG(ag_contact_should_transfer(tbl, 8, NEW, 50000, COOLDOWN),
+                  "9th distinct peer must transfer (fresh insert)");
+        int has_new = 0, has_stalest = 0;
+        for (int i = 0; i < 8; i++) {
+            if (tbl[i].used && tbl[i].peer_lo24 == NEW) has_new = 1;
+            if (tbl[i].used && tbl[i].peer_lo24 == 0x100u) has_stalest = 1;
+        }
+        CHECK_MSG(has_new, "the new peer must occupy a slot");
+        CHECK_MSG(!has_stalest, "the stalest peer (0x100) must have been evicted");
+    }
+
+    // (14) time wrap-around / now < last guard: a clock that appears to run
+    //      backwards (monotonic ms wrap or reset) is treated as cooldown-elapsed
+    //      rather than wrapping the unsigned subtraction into a huge gap that
+    //      would wedge the peer "cooling down" forever.
+    {
+        ag_contact_t tbl[8];
+        memset(tbl, 0, sizeof(tbl));
+        const uint32_t P = 0x55AA55;
+        // First contact near the top of the 32-bit ms range.
+        CHECK(ag_contact_should_transfer(tbl, 8, P, 0xFFFFF000u, COOLDOWN));
+        // Clock wraps past zero (now < last): must NOT be stuck cooling down.
+        CHECK_MSG(ag_contact_should_transfer(tbl, 8, P, 0x00000100u, COOLDOWN),
+                  "post-wrap contact must transfer, not wedge on a huge gap");
+    }
+
+    // (15) defensive arg guards: NULL table / zero capacity never transfer.
+    {
+        ag_contact_t tbl[1];
+        memset(tbl, 0, sizeof(tbl));
+        CHECK(!ag_contact_should_transfer(NULL, 8, 0x1, 0, COOLDOWN));
+        CHECK(!ag_contact_should_transfer(tbl, 0, 0x1, 0, COOLDOWN));
+    }
+
     TEST_SUMMARY();
 }
