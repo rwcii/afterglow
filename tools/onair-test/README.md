@@ -7,6 +7,32 @@ address against ground truth. A second test (`test_rssi_power.py`) adds a third
 board, a passive observer, to confirm that the per-ghost TX-power level the
 firmware commands actually changes the radiated signal.
 
+## Physical setup
+
+Two or three identical **ESP32-S3** boards (XIAO ESP32-S3 or any S3 dev board),
+each connected to the host by its **own USB cable** — there is **no interconnect
+between boards** (no GPIO/UART wiring; they communicate only over the air). Place
+them within a meter or so of each other so all three are comfortably in BLE
+range.
+
+- Replay-path test (`test_onair.py`): 2 boards — **DUT** + **stimulus**.
+- RSSI/power test (`test_rssi_power.py`): 3 boards — **DUT** + **stimulus** +
+  **observer**.
+
+Each board enumerates as a serial port (`/dev/ttyACM*` on Linux,
+`/dev/cu.usbmodem*` on macOS). The harness defaults assume `ACM0`=DUT,
+`ACM1`=stimulus, `ACM2`=observer; override with the `AG_*_PORT` env vars below if
+yours differ. On Linux a freshly-enumerated board may come up owned by
+`root:dialout`; if flashing fails with a permission error, add your user to the
+`dialout` group (then re-login) or `sudo chmod 666 /dev/ttyACM<n>`.
+
+A note on results: the RSSI/power sweep measures a ghost as it competes for the
+single replay radio against every other replay-eligible source the DUT has
+captured. In a busy RF environment the swept ghost is serviced sparsely, so a
+single run typically populates only a subset of the power ladder — the harness
+asserts the monotonic RSSI-vs-power trend over the levels it does observe rather
+than requiring every level. A quiet RF environment gives denser coverage.
+
 ## Boards
 
 - **DUT** — the Afterglow firmware built with the on-air test hook:

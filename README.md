@@ -11,9 +11,12 @@ no longer reliably conclude that the presence of an identifier means the
 corresponding device is physically there.
 
 > **Status:** P1–P4 implemented and building clean for the ESP32-S3 (ESP-IDF
-> v5.3.x). Host unit/statistical tests pass in CI; on-hardware flash and
-> operational testing are in progress. Wi-Fi beacon replay and the mesh ship
-> **disabled by default** pending field validation.
+> v5.3.x). Host unit/statistical tests pass in CI. On-hardware validation is
+> underway on a multi-board on-air rig (`tools/onair-test`): the BLE capture →
+> classify → cloned-address replay path and the per-ghost TX-power control (the
+> received signal tracks the commanded level on ESP32-S3/Bluedroid) are both
+> confirmed on hardware; broader operational testing continues. Wi-Fi beacon
+> replay and the mesh ship **disabled by default** pending field validation.
 
 ## Intended use & boundaries
 
@@ -66,6 +69,11 @@ cmake -S test/host -B build/host -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/host -j
 ctest --test-dir build/host --output-on-failure
 ```
+
+On-hardware behavior is checked with a multi-board on-air rig: a device under
+test, a controllable advertiser, and a passive observer, driven by automated
+harnesses with no human in the loop. See [`tools/onair-test`](tools/onair-test)
+for the board topology, build steps, and what each test asserts.
 
 ## Architecture
 

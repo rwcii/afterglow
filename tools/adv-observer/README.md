@@ -31,5 +31,9 @@ emit path intends.
 . $IDF_PATH/export.sh
 idf.py -B build set-target esp32s3      # first build only
 idf.py -B build build
-idf.py -p /dev/ttyACM1 flash monitor    # use the observer board's port
+idf.py -B build -p /dev/ttyACM2 flash monitor   # use the observer board's port
 ```
+
+In the automated three-board rig (`tools/onair-test/test_rssi_power.py`) the
+observer is the third board, conventionally `/dev/ttyACM2`; flash whichever port
+your observer board enumerates as.
