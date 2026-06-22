@@ -23,12 +23,35 @@
 extern "C" {
 #endif
 
+// Wire protocol version. Carried on BOTH the HELLO heartbeat and every DATA
+// fragment so a peer can recognize and reject a frame whose layout it does not
+// understand. Bump whenever the on-wire HELLO/DATA layout changes (the layout
+// that added addr_type + origin_lo16 to DATA). Lives here (portable) so the
+// emit side, the parser, and the host tests share one source of truth.
+//
+// VALUE CONSTRAINT (load-bearing): the DATA version byte sits immediately after
+// the type byte, at the same wire offset an OLDER DATA layout (which carried no
+// version byte) placed its `ttl` field. The version gate can therefore only
+// reject an older DATA frame if AG_MESH_VERSION can never equal a value that
+// older field held there. The older ttl ranged over the carry-TTL set
+// {1..AG_TTL_INIT} (AG_TTL_INIT==3) plus the replay-only 0, i.e. 0..3. So the
+// version MUST stay OUTSIDE 0..AG_MESH_VERSION_MIN (see the compile-time check
+// in mesh_logic.c): a high reserved value (0x80) that no legacy ttl/index byte
+// at that offset can take. Keep new versions in the reserved high band.
+#define AG_MESH_VERSION 0x80
+
+// Smallest version value that is safely distinguishable from a legacy DATA frame
+// at the version offset. A legacy DATA frame placed `ttl` (0..AG_TTL_INIT) where
+// the version byte now lives; any version <= AG_TTL_INIT could be a legacy ttl
+// and would slip through the gate. AG_MESH_VERSION must exceed this.
+#define AG_MESH_VERSION_MIN 0x03
+
 // frag_index / frag_total are 4-bit fields on the wire, so a record can span at
 // most this many body fragments.
 #define AG_MESH_FRAG_MAX 15
 
-// Body bytes carried per DATA fragment. The DATA frame header (type, ttl,
-// frag_byte, rec_id:2, addr_type, origin_lo16:2) leaves room for this many
+// Body bytes carried per DATA fragment. The DATA frame header (type, version,
+// ttl, frag_byte, rec_id:2, addr_type, origin_lo16:2) leaves room for this many
 // payload bytes in a 31-byte adv. BOTH the emit side and the reassembly side
 // MUST use this one constant so the fragment offset math can never drift.
 #define AG_MESH_FRAG_BODY 16
@@ -65,6 +88,14 @@ typedef struct {
 bool ag_contact_should_transfer(ag_contact_t *table, uint8_t cap,
                                 uint32_t peer_lo24, uint32_t now_ms,
                                 uint32_t cooldown_ms);
+
+// Does a frame's carried wire version match what this build speaks? A peer
+// advertising a different AG_MESH_VERSION has a layout we cannot parse safely
+// (e.g. a v1 DATA frame lacks the version/addr_type/origin bytes a v2 parser
+// reads), so HELLO discovery and DATA admission both gate on this: a mismatched
+// peer is neither transferred to nor absorbed from. Returns true iff the carried
+// version equals AG_MESH_VERSION.
+bool ag_mesh_version_ok(uint8_t wire_version);
 
 // May this record be handed to a peer? Stricter than replay eligibility: the
 // record must be replay-eligible AND have been seen on >= 2 sweeps (a multi-

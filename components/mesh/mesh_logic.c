@@ -1,6 +1,25 @@
 // mesh_logic.c — portable mesh transfer math (host-tested in test_mesh.c).
 #include "mesh_logic.h"
+#include "ag_core/ag_meshguard.h"  // AG_TTL_INIT — the legacy-ttl value range the
+                                   // DATA version byte must stay clear of.
 #include <string.h>     // memset / memcpy (reassembly staging)
+
+// The DATA version byte occupies the wire offset a legacy DATA frame used for
+// `ttl` (0..AG_TTL_INIT). If AG_MESH_VERSION fell in that range, a legacy frame
+// whose ttl equalled it would slip through ag_mesh_version_ok and be misparsed.
+// AG_MESH_VERSION_MIN encodes that lower bound; pin both invariants at compile
+// time so a future version bump back into the ttl band fails the build, not the
+// field.
+_Static_assert(AG_MESH_VERSION_MIN >= AG_TTL_INIT,
+               "version floor must cover the full legacy ttl range");
+_Static_assert(AG_MESH_VERSION > AG_MESH_VERSION_MIN,
+               "AG_MESH_VERSION must exceed the legacy-ttl band to stay "
+               "distinguishable from a versionless legacy DATA frame");
+
+bool ag_mesh_version_ok(uint8_t wire_version)
+{
+    return wire_version == AG_MESH_VERSION;
+}
 
 bool ag_mesh_carry_eligible(const ag_beacon_record_t *rec)
 {
