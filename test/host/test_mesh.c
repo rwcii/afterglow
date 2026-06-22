@@ -1,5 +1,7 @@
-// test_mesh.c — portable mesh transfer math (carry gate, subset, fragmentation).
+// test_mesh.c — portable mesh transfer math (carry gate, subset, fragmentation,
+// fragment reassembly state machine, and the wire/pool rec_id round-trip).
 #include "mesh_logic.h"
+#include "pool_logic.h"     // ag_pool_rec_id — wire/pool rec_id round-trip
 #include "test_util.h"
 #include <string.h>
 
@@ -244,6 +246,173 @@ int main(void)
         memset(tbl, 0, sizeof(tbl));
         CHECK(!ag_contact_should_transfer(NULL, 8, 0x1, 0, COOLDOWN));
         CHECK(!ag_contact_should_transfer(tbl, 0, 0x1, 0, COOLDOWN));
+    }
+
+    // --- fragment reassembly state machine ---------------------------------
+    // Body bytes per fragment are the ONE shared constant both emit and reassemble
+    // key off, so a payload of 2*BODY+1 needs exactly 3 fragments.
+    const uint8_t BODY = AG_MESH_FRAG_BODY;
+
+    // (16) a multi-fragment record reassembles to the exact original payload only
+    //      once every fragment has landed; out-of-order delivery is fine.
+    {
+        uint8_t payload[24];
+        for (int i = 0; i < 24; i++) payload[i] = (uint8_t)(0xA0 + i);
+        uint8_t frags = ag_mesh_frag_count(sizeof(payload), BODY);
+        CHECK_MSG(frags == 2, "24B/%uB body should be 2 fragments, got %u", BODY, frags);
+
+        ag_reasm_t r; ag_reasm_reset(&r);
+        // deliver fragment 1 first (out of order): PARTIAL, not yet complete.
+        uint8_t off1 = (uint8_t)(1 * BODY), len1 = (uint8_t)(sizeof(payload) - off1);
+        ag_reasm_verdict_t v1 = ag_reasm_add(&r, 0x1234,
+            (uint8_t)((1 << 4) | frags), payload + off1, len1);
+        CHECK_MSG(v1 == AG_REASM_PARTIAL, "first-of-two fragment must be PARTIAL");
+        // deliver fragment 0: completes.
+        ag_reasm_verdict_t v0 = ag_reasm_add(&r, 0x1234,
+            (uint8_t)((0 << 4) | frags), payload, BODY);
+        CHECK_MSG(v0 == AG_REASM_COMPLETE, "last missing fragment must COMPLETE");
+        CHECK_MSG(r.payload_len == sizeof(payload), "reassembled len %u != %u",
+                  r.payload_len, (unsigned)sizeof(payload));
+        CHECK_MSG(memcmp(r.payload, payload, sizeof(payload)) == 0,
+                  "reassembled payload mismatch");
+    }
+
+    // (17) a single-fragment record completes immediately.
+    {
+        uint8_t payload[10];
+        for (int i = 0; i < 10; i++) payload[i] = (uint8_t)i;
+        ag_reasm_t r; ag_reasm_reset(&r);
+        ag_reasm_verdict_t v = ag_reasm_add(&r, 0x55, (uint8_t)((0 << 4) | 1),
+                                            payload, sizeof(payload));
+        CHECK(v == AG_REASM_COMPLETE);
+        CHECK(r.payload_len == sizeof(payload));
+    }
+
+    // (18) malformed fragment headers are rejected (BADFRAG) and leave no state.
+    {
+        ag_reasm_t r; ag_reasm_reset(&r);
+        uint8_t b[4] = {1, 2, 3, 4};
+        CHECK(ag_reasm_add(&r, 0x1, 0x00, b, 4) == AG_REASM_BADFRAG); // total 0
+        CHECK(!r.used);
+        CHECK(ag_reasm_add(&r, 0x1, (uint8_t)((2 << 4) | 2), b, 4) == AG_REASM_BADFRAG); // idx 2 of 2
+        CHECK(!r.used);
+        // an over-large declared total (the 4-bit wire field allows up to 15, but
+        // the 31-byte buffer + 8-bit mask support far fewer) is rejected so a
+        // crafted frame cannot complete early against a truncated mask.
+        CHECK_MSG(ag_reasm_add(&r, 0x1, (uint8_t)((0 << 4) | 12), b, 4)
+                  == AG_REASM_BADFRAG, "frag_total=12 must be rejected");
+        CHECK(!r.used);
+        // a fragment whose body would land past the staging buffer is rejected
+        // rather than marked present-but-unstaged. With BODY=16, a (bogus) idx=2
+        // of a 3-total record sits at off=32 > 31.
+        CHECK_MSG(ag_reasm_add(&r, 0x1, (uint8_t)((2 << 4) | 3), b, 4)
+                  == AG_REASM_BADFRAG, "out-of-range offset must be rejected");
+        CHECK(!r.used);
+        // NULL body is rejected.
+        CHECK(ag_reasm_add(&r, 0x1, (uint8_t)((0 << 4) | 1), NULL, 4) == AG_REASM_BADFRAG);
+    }
+
+    // (18b) a fragment whose declared total disagrees with the slot's (set by the
+    //       first fragment of this rec_id) is dropped — it must not complete
+    //       against the wrong mask.
+    {
+        ag_reasm_t r; ag_reasm_reset(&r);
+        uint8_t b[BODY]; memset(b, 0x5A, sizeof(b));
+        // first fragment claims a 2-fragment record.
+        CHECK(ag_reasm_add(&r, 0x7, (uint8_t)((0 << 4) | 2), b, BODY) == AG_REASM_PARTIAL);
+        // a second fragment for the same rec_id claims a 1-fragment total: drop it
+        // (otherwise full=(1<<1)-1=1 and bit 0 already set would falsely COMPLETE).
+        CHECK_MSG(ag_reasm_add(&r, 0x7, (uint8_t)((0 << 4) | 1), b, 4)
+                  == AG_REASM_BADFRAG, "inconsistent frag_total must be dropped");
+        // the slot stays a 2-fragment in-flight record.
+        CHECK(r.used && r.frag_total == 2);
+    }
+
+    // (19) duplicate fragments don't double-count: re-delivering frag 0 of a
+    //      2-frag record stays PARTIAL until frag 1 finally lands.
+    {
+        ag_reasm_t r; ag_reasm_reset(&r);
+        uint8_t b[BODY]; memset(b, 0x77, sizeof(b));
+        CHECK(ag_reasm_add(&r, 0x9, (uint8_t)((0 << 4) | 2), b, BODY) == AG_REASM_PARTIAL);
+        CHECK(ag_reasm_add(&r, 0x9, (uint8_t)((0 << 4) | 2), b, BODY) == AG_REASM_PARTIAL);
+        CHECK(ag_reasm_add(&r, 0x9, (uint8_t)((1 << 4) | 2), b, 4) == AG_REASM_COMPLETE);
+    }
+
+    // (20) slot_for: an existing rec_id reuses its slot; a new rec_id takes a
+    //      free slot; under pressure a deterministic victim is overwritten.
+    {
+        ag_reasm_t slots[4];
+        for (int i = 0; i < 4; i++) ag_reasm_reset(&slots[i]);
+        uint8_t b[4] = {1, 2, 3, 4};
+        // fill all 4 slots with distinct, still-in-flight (2-frag) records.
+        for (uint16_t id = 0; id < 4; id++) {
+            int s = ag_reasm_slot_for(slots, 4, id);
+            CHECK(ag_reasm_add(&slots[s], id, (uint8_t)((0 << 4) | 2), b, 4)
+                  == AG_REASM_PARTIAL);
+        }
+        // re-offering an existing id returns its same slot (no new allocation).
+        int again = ag_reasm_slot_for(slots, 4, 2);
+        CHECK_MSG(slots[again].rec_id == 2, "existing rec_id must reuse its slot");
+        // a 5th distinct id under pressure picks the deterministic victim id%cap.
+        int victim = ag_reasm_slot_for(slots, 4, 100);
+        CHECK_MSG(victim == (int)(100 % 4), "overwrite victim must be rec_id%%cap");
+    }
+
+    // --- wire/pool rec_id round-trip (dedup correctness) -------------------
+    // The seen-set dedups on the WIRE rec_id. addr_type is part of a record's
+    // identity (rec_id = hash(addr_type || orig_addr || payload)), so it must be
+    // carried on the wire — otherwise the receiver's view of the identity is
+    // wrong. The reassembly path stages the payload and reconstructs orig_addr
+    // from its prefix; the wire also carries addr_type and the frozen rec_id.
+    {
+        const uint8_t addr_type = 1;
+        uint8_t payload[24];
+        for (int i = 0; i < 24; i++) payload[i] = (uint8_t)(0x30 + i);
+        // sender's stable rec_id, frozen at first sighting over THIS payload.
+        uint16_t wire = ag_pool_rec_id(addr_type, payload /*orig_addr=payload[0..6]*/,
+                                       payload, sizeof(payload));
+
+        // receiver reassembles the payload (possibly a LATER sighting of the
+        // same device, whose mutable bytes have drifted) and sets addr_type +
+        // orig_addr from the wire/prefix.
+        uint8_t frags = ag_mesh_frag_count(sizeof(payload), BODY);
+        ag_reasm_t r; ag_reasm_reset(&r);
+        ag_reasm_verdict_t v = AG_REASM_PARTIAL;
+        for (uint8_t f = 0; f < frags; f++) {
+            uint8_t off = (uint8_t)(f * BODY);
+            uint8_t len = (uint8_t)(sizeof(payload) - off);
+            if (len > BODY) len = BODY;
+            v = ag_reasm_add(&r, wire, (uint8_t)((f << 4) | frags),
+                             payload + off, len);
+        }
+        CHECK(v == AG_REASM_COMPLETE);
+
+        // When the staged payload still matches the sender's first-sighting
+        // payload, a recompute reproduces the wire id...
+        uint8_t orig_addr[6];
+        memcpy(orig_addr, r.payload, 6);            // identity from payload prefix
+        uint16_t same = ag_pool_rec_id(addr_type, orig_addr, r.payload, r.payload_len);
+        CHECK_MSG(same == wire, "matched payload should recompute the wire id");
+
+        // ...but a real beacon's MUTABLE bytes drift between sightings: the
+        // sender froze rec_id at the first sighting while transmitting a LATER
+        // payload, so recomputing on the receiver would mint a DIFFERENT id than
+        // the seen-set deduped on. The pool must therefore TRUST the carried
+        // wire rec_id (pool_insert_record's trust_rec_id path) rather than
+        // recompute. This is the load-bearing dedup fix.
+        uint8_t drifted[24];
+        memcpy(drifted, r.payload, sizeof(drifted));
+        drifted[20] ^= 0xFF;   // a mutable counter byte advanced
+        uint16_t recomputed = ag_pool_rec_id(addr_type, orig_addr, drifted,
+                                             sizeof(drifted));
+        CHECK_MSG(recomputed != wire,
+                  "payload drift must change a recompute (so recompute-on-absorb "
+                  "would break dedup; the pool must trust the wire rec_id)");
+
+        // addr_type is genuinely part of the identity (so carrying it matters).
+        uint16_t wrong = ag_pool_rec_id((uint8_t)(addr_type ^ 1), orig_addr,
+                                        r.payload, r.payload_len);
+        CHECK_MSG(wrong != wire, "addr_type must affect rec_id");
     }
 
     TEST_SUMMARY();
