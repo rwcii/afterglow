@@ -21,6 +21,15 @@ int8_t ag_pool_rssi_ewma(int8_t prev_ewma, int8_t sample)
     return (int8_t)((int)prev_ewma + (delta >> 3));
 }
 
+uint8_t ag_pool_rssi_dev_ewma(uint8_t prev_dev, int8_t prev_ewma, int8_t sample)
+{
+    // dev += (|sample - prev_ewma| - dev) / 8. Integer math, rounds toward 0.
+    int d = (int)sample - (int)prev_ewma;
+    if (d < 0) d = -d;
+    int delta = d - (int)prev_dev;
+    return (uint8_t)((int)prev_dev + (delta >> 3));
+}
+
 int ag_pool_find(const ag_beacon_record_t *slab, uint16_t count,
                  uint8_t addr_type, const uint8_t orig_addr[6],
                  const uint8_t *payload, uint8_t payload_len)
@@ -52,6 +61,10 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     if (idx >= 0) {
         ag_beacon_record_t *r = &slab[idx];
         r->rssi_last = cap->rssi;
+        // Temporal deviation first: it measures the new sample against the PRIOR
+        // mean, so it must run before rssi_ewma absorbs the sample.
+        r->rssi_dev_ewma = ag_pool_rssi_dev_ewma(r->rssi_dev_ewma, r->rssi_ewma,
+                                                 cap->rssi);
         r->rssi_ewma = ag_pool_rssi_ewma(r->rssi_ewma, cap->rssi);
         if (r->obs_count < 255) r->obs_count++;
         // Refresh the stored payload to the latest sighting so replay emits the

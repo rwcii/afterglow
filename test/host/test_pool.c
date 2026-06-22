@@ -70,6 +70,53 @@ int main(void)
     int full = ag_pool_admit(slab, &count, CAP, &cfull, frnew, 1, 9000, 0, &evp, &rng);
     CHECK_MSG(full < 0, "admit into full slab should fail, got %d", full);
 
+    // (5b) temporal-deviation EWMA: a source held at a STEADY level converges
+    //      its rssi_dev_ewma toward ~0 regardless of which level it sits at, so
+    //      several steady sources at very DIFFERENT levels (big spatial spread)
+    //      still each report near-zero temporal deviation. This is the
+    //      headline: a quiet room of steady-but-spread devices must not look
+    //      "mobile". Build it on a fresh slab to keep counts clean.
+    {
+        enum { CAP2 = 8 };
+        ag_beacon_record_t s2[CAP2];
+        uint16_t c2c = 0;
+        // three sources pinned at -40, -60, -85 dBm (20+ dB spatial spread),
+        // each rock-steady across many sightings.
+        int8_t levels[3] = {-40, -60, -85};
+        for (int s = 0; s < 3; s++) {
+            uint8_t fr[6] = {0x10, 0x20, 0x30, 0x40, 0x50, (uint8_t)s};
+            for (int t = 0; t < 40; t++) {
+                ag_capture_t cs = mk_cap(AG_PROTO_BLE, levels[s], fr, 6,
+                                         (uint64_t)(t * 1000));
+                ag_pool_admit(s2, &c2c, CAP2, &cs, fr, 1,
+                              (uint32_t)(1000 + t * 1000), 0, &evp, &rng);
+            }
+        }
+        CHECK(c2c == 3);
+        for (uint16_t z = 0; z < c2c; z++) {
+            CHECK_MSG(s2[z].rssi_dev_ewma <= 1,
+                      "steady source %u shows temporal dev %u (should be ~0)",
+                      z, s2[z].rssi_dev_ewma);
+        }
+
+        // (5c) a JITTERY source (alternating ±10 dB around its mean) accumulates
+        //      a clearly NON-zero temporal deviation — the case ghosts SHOULD
+        //      track. Same mean as source 0, so spatial spread is unchanged.
+        uint8_t fj[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0xEE};
+        uint16_t before_j = c2c;
+        for (int t = 0; t < 60; t++) {
+            int8_t r = (t & 1) ? (int8_t)-50 : (int8_t)-70;  // mean -60, ±10
+            ag_capture_t cj = mk_cap(AG_PROTO_BLE, r, fj, 6, (uint64_t)(t * 1000));
+            ag_pool_admit(s2, &c2c, CAP2, &cj, fj, 1,
+                          (uint32_t)(1000 + t * 1000), 0, &evp, &rng);
+        }
+        CHECK(c2c == before_j + 1);
+        ag_beacon_record_t *jit = &s2[before_j];
+        CHECK_MSG(jit->rssi_dev_ewma >= 5,
+                  "jittery source temporal dev %u too low (should track motion)",
+                  jit->rssi_dev_ewma);
+    }
+
     // (6) sweep far in the future evicts (records exceed TTL), and the slab
     //     stays compacted (count shrinks, survivors in [0,count)).
     uint16_t before = count;

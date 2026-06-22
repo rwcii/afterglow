@@ -44,6 +44,9 @@ typedef struct {
     uint32_t origin_node;       // full 32-bit NodeID of first air-capturer
     uint16_t interval_q;        // estimated cadence (0.625 ms / TU units)
     int8_t   rssi_last, rssi_ewma;
+    uint8_t  rssi_dev_ewma;     // EWMA of |sample - prior rssi_ewma|, dB magnitude:
+                                // this source's TEMPORAL RSSI variability,
+                                // distinct from cross-source spatial spread.
     uint8_t  channel, obs_count, hop_ttl;
     uint8_t  adv_kind;          // ag_adv_kind_t — observed PDU behavior (broadcast/scannable/connectable)
     uint16_t wifi_seq;          // per-ghost synthetic 802.11 seq state

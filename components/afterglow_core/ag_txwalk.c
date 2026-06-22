@@ -65,6 +65,17 @@ float ag_txwalk_step(const ag_txwalk_params_t *prm, ag_prng_t *rng, float *p_vir
     return v;
 }
 
+float ag_txwalk_ambient_sigma(float ambient_dev_db)
+{
+    // Map an observed ambient RSSI deviation (dB) to a per-step walk sigma,
+    // held in a sane band. 0.3 attenuates the observed spread; the [0.8, 4.0]
+    // clamp keeps the synthesized walk neither frozen nor implausibly jumpy.
+    float sigma = ambient_dev_db * 0.3f;
+    if (sigma < 0.8f) sigma = 0.8f;
+    if (sigma > 4.0f) sigma = 4.0f;
+    return sigma;
+}
+
 int ag_txwalk_quantize(const float *ladder, int n, float p_virt)
 {
     int best = 0;

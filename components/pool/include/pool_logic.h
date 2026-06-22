@@ -26,6 +26,13 @@ uint16_t ag_pool_rec_id(uint8_t addr_type, const uint8_t orig_addr[6],
 // EWMA update for int8 RSSI (alpha ~ 1/8). Returns the new ewma.
 int8_t ag_pool_rssi_ewma(int8_t prev_ewma, int8_t sample);
 
+// EWMA of the per-source temporal deviation: |sample - prev_ewma| smoothed at
+// alpha ~ 1/8. `prev_ewma` is the source's mean BEFORE this sample is folded in,
+// so callers MUST compute this against the OLD mean, then update the mean. The
+// result tracks how much one source's signal moves over time (temporal
+// variance), as opposed to how far different sources sit from each other.
+uint8_t ag_pool_rssi_dev_ewma(uint8_t prev_dev, int8_t prev_ewma, int8_t sample);
+
 // Find the slot index of an existing record matching cap's identity, or -1.
 // `slab` holds `count` live records (compacted: indices [0,count)).
 int ag_pool_find(const ag_beacon_record_t *slab, uint16_t count,
