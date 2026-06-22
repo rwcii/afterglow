@@ -75,7 +75,7 @@ foreach(t test_config test_pool test_classifier test_adv_kind test_lifecycle tes
 endforeach()
 
 # --- separability tests ---------------------------------------------------
-foreach(t test_separability test_eligibility)
+foreach(t test_separability test_eligibility test_aggregate_separability)
     add_executable(${t} separability/${t}.c)
     target_link_libraries(${t} PRIVATE separability afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
