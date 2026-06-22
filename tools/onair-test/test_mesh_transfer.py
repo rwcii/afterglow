@@ -52,13 +52,16 @@ AG_ONAIR_TEST build.
 """
 import os
 import re
+import sys
 import time
+from pathlib import Path
 
-from test_rssi_power import Board
+import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-A_PORT = os.environ.get("AG_MESH_A_PORT", "/dev/ttyACM0")
-B_PORT = os.environ.get("AG_MESH_B_PORT", "/dev/ttyACM1")
+from rig import Board, RigConfig, Roles  # noqa: E402
+
 
 # Transfer window. First contact lands within ~10 s of the HELLO heartbeat; a
 # re-offer needs a second transfer, so allow a long window so the contact
@@ -72,17 +75,6 @@ FRAGRX_RE = re.compile(r"ONAIR mesh frag-rx rec=([0-9a-f]+) idx=(\d+) of=(\d+)")
 REASM_RE = re.compile(r"ONAIR mesh reasm-complete rec=([0-9a-f]+)")
 ABSORB_RE = re.compile(r"ONAIR mesh absorb rec=([0-9a-f]+) verdict=(\w+)")
 RECID_RE = re.compile(r"ONAIR mesh recid-check wire=([0-9a-f]+) pool=([0-9a-f]+)")
-
-
-def _reset(board):
-    """Pulse the ESP32-S3 into a clean reboot via the USB-JTAG reset line so the
-    boot banner, the seed line, and the first transfer land inside the window."""
-    board.ser.setDTR(False)
-    board.ser.setRTS(True)   # assert reset
-    time.sleep(0.2)
-    board.ser.setRTS(False)  # release reset
-    time.sleep(0.3)
-    board.drain()
 
 
 def _parse(ev, side, line):
@@ -119,8 +111,8 @@ def _blank(side):
 
 def collect(a, b, seconds):
     ev = {"a": _blank("a"), "b": _blank("b")}
-    _reset(a)
-    _reset(b)
+    a.reset_pulse()
+    b.reset_pulse()
     deadline = time.time() + seconds
     while time.time() < deadline:
         for ln in a.lines():
@@ -131,14 +123,9 @@ def collect(a, b, seconds):
     return ev
 
 
-def run(collect_s=COLLECT_S):
-    a = Board(A_PORT)
-    b = Board(B_PORT)
-    try:
-        ev = collect(a, b, collect_s)
-    finally:
-        a.close()
-        b.close()
+def _run(a, b, collect_s=COLLECT_S):
+    """Run the transfer capture on already-open boards; return the event log."""
+    ev = collect(a, b, collect_s)
 
     print("\n=== mesh data transfer ===", flush=True)
     for s in ("a", "b"):
@@ -203,10 +190,23 @@ def _direction_ok(sender, receiver):
     return True, ", ".join(note)
 
 
+def run(collect_s=COLLECT_S):
+    """Standalone entry: open both peers, run the transfer capture, print it."""
+    cfg = RigConfig()
+    a = Board(cfg.require_port(Roles.PEER_A))
+    b = Board(cfg.require_port(Roles.PEER_B))
+    try:
+        return _run(a, b, collect_s)
+    finally:
+        a.close()
+        b.close()
+
+
 # --- pytest entry -----------------------------------------------------------
 
-def test_fragmented_transfer_reassembly_dedup():
-    ev = run()
+@pytest.mark.rig_roles("peer_a", "peer_b")
+def test_fragmented_transfer_reassembly_dedup(rig):
+    ev = _run(rig[Roles.PEER_A], rig[Roles.PEER_B])
     assert ev["a"]["self"] and ev["b"]["self"], \
         "a board never logged a NodeID (AG_ONAIR_TEST + mesh force-enable?)"
     ab_ok, ab_why = _direction_ok(ev["a"], ev["b"])

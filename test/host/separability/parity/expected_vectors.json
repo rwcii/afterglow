@@ -1,0 +1,18 @@
+{
+  "_note": "C-computed via detector.c; regenerate with gen_vectors",
+  "seed": 12648430,
+  "n": 1500,
+  "ks_statistic": 0.092000000000000082,
+  "ks_critical_05": 0.049587148872801037,
+  "ks_statistic_small": 0.5,
+  "ks_critical_05_small": 0.64415595937629888,
+  "interval_regularity_cv_a": 0.028829231709633096,
+  "interval_regularity_cv_b": 0.022948996910311967,
+  "interval_regularity_cv_small": 0,
+  "rssi_stability_a": 3.4675301181856213,
+  "rssi_stability_b": 2.9061987833600531,
+  "rssi_stability_small": 1.165922381636102,
+  "two_means_separation_pooled": 1.7252169607949497,
+  "two_means_separation_bimodal": 1.9990007493755464,
+  "two_means_separation_small": 1.8583283937188484
+}

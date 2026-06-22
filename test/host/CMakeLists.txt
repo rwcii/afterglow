@@ -80,3 +80,11 @@ foreach(t test_separability test_eligibility)
     target_link_libraries(${t} PRIVATE separability afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+# --- parity-vector generator ----------------------------------------------
+# Runs the real detector.c primitives on fixed inputs and emits the C-computed
+# expected vectors that lock the Python detector port (rig/separability.py).
+# Regenerate the committed vectors with:
+#   ./build/host/gen_vectors > test/host/separability/parity/expected_vectors.json
+add_executable(gen_vectors separability/parity/gen_vectors.c)
+target_link_libraries(gen_vectors PRIVATE separability)

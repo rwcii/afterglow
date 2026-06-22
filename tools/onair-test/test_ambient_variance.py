@@ -52,15 +52,18 @@ assertion (1)'s fallback branch is exercised; that is reported, not failed.
 """
 import os
 import re
+import sys
 import time
+from pathlib import Path
 
-# Reuse the serial Board + helpers from the power-sweep harness; they are the
-# same three-board rig.
-from test_rssi_power import Board, _median, ADV_RE
+import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DUT_PORT = os.environ.get("AG_DUT_PORT", "/dev/ttyACM0")
-OBS_PORT = os.environ.get("AG_OBS_PORT", "/dev/ttyACM2")
+# Reuse the serial Board + helpers from the shared rig; they are the same
+# three-board rig.
+from rig import Board, RigConfig, Roles, median, ADV_RE  # noqa: E402
+
 
 # Collect over several slow sweeps (the DUT updates ambient on its eviction-sweep
 # cadence, ~30 s) so we see multiple ONAIR ambient lines and enough observer
@@ -147,15 +150,10 @@ def observer_spatial_spread(obs_by_addr, min_samples=8):
     return _stdev(means), len(means)
 
 
-def run():
-    dut = Board(DUT_PORT)
-    obs = Board(OBS_PORT)
-    try:
-        print(f"[rig] collecting ambient + observer for {COLLECT_S:.0f}s", flush=True)
-        reports, obs_by_addr = collect(dut, obs, COLLECT_S)
-    finally:
-        dut.close()
-        obs.close()
+def _run(dut, obs):
+    """Run the ambient-variance check on already-open boards; return 0/1."""
+    print(f"[rig] collecting ambient + observer for {COLLECT_S:.0f}s", flush=True)
+    reports, obs_by_addr = collect(dut, obs, COLLECT_S)
 
     failures = []
 
@@ -244,11 +242,22 @@ def run():
     return 0
 
 
-def test_ambient_variance():
-    assert run() == 0
+def run():
+    """Standalone entry: open the DUT + observer, run the check, return 0/1."""
+    cfg = RigConfig()
+    dut = Board(cfg.require_port(Roles.DUT))
+    obs = Board(cfg.require_port(Roles.OBSERVER))
+    try:
+        return _run(dut, obs)
+    finally:
+        dut.close()
+        obs.close()
+
+
+@pytest.mark.rig_roles("dut", "observer")
+def test_ambient_variance(rig):
+    assert _run(rig[Roles.DUT], rig[Roles.OBSERVER]) == 0
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(run())

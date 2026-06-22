@@ -1,0 +1,100 @@
+name: onair-rig
+
+# DORMANT on-air hardware test workflow. It targets a self-hosted runner label
+# (`afterglow-rig`) that DOES NOT EXIST yet, so nothing picks up these jobs and
+# they never run. It is also `continue-on-error: true` and is NOT a required
+# check, so even once a runner exists it reports status only and never gates a
+# PR. Activate it by registering a runner with the label below (see the README
+# section "Self-hosted on-air rig runner" and the comment block at the end of
+# this file) AFTER the dev box migrates to dedicated non-Docker hardware.
+#
+# Triggers: manual dispatch, a nightly cron, and an opt-in PR label
+# (`run-onair-rig`) for on-demand runs against the rig.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 07:00 UTC.
+    - cron: "0 7 * * *"
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  # One rig run at a time — the boards are a single shared physical resource.
+  group: onair-rig
+  cancel-in-progress: false
+
+jobs:
+  onair-rig:
+    # Inert until a runner advertises ALL of these labels. The custom
+    # `afterglow-rig` label is not registered anywhere yet, so no runner matches.
+    runs-on: [self-hosted, linux, x64, afterglow-rig]
+    # Status-only: never fails a PR even after the runner exists.
+    continue-on-error: true
+    # Nightly + dispatch always; on PRs only when explicitly labelled AND the PR
+    # head is a branch in THIS repo (never a fork). Self-hosted runners must
+    # never execute untrusted fork code: the label is a maintainer gate, and the
+    # same-repo check is a hard backstop so even a mislabelled fork PR cannot run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'run-onair-rig') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    env:
+      # LIVE rig quorum: a run passes if 3 of 5 independent repeats pass, with one
+      # retry per repeat. The harness refactor stays 1/1 by default; these values
+      # apply only on the live runner.
+      AG_RIG_QUORUM_K: "3"
+      AG_RIG_QUORUM_N: "5"
+      AG_RIG_RETRIES: "1"
+      # Reclaim a board's serial port if a stray process holds it open.
+      AG_RIG_FUSER_K: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          python3 --version
+          ls -l /dev/ttyACM* || true
+
+      - name: Install host deps
+        run: |
+          python3 -m pip install --upgrade pip pytest pyserial
+
+      # The rig boards are expected already flashed with the AG_ONAIR_TEST build
+      # (DUT/peers) and the stimulus/observer firmwares. Port roles resolve from
+      # AG_*_PORT env on the runner (see the rig roles back-compat aliases).
+      - name: On-air rig tests
+        run: |
+          python3 -m pytest tools/onair-test -v
+
+# ---------------------------------------------------------------------------
+# Runner registration — DOCUMENTED, NOT EXECUTED.
+#
+# Do NOT run these here. Register the runner manually on the dedicated on-air
+# hardware AFTER the migration, then this workflow goes live automatically.
+#
+#   1. On the rig host (Linux x86_64, Python 3.12, gh, 3x ESP32-S3 boards on
+#      /dev/ttyACM0..2), create a runner in repo Settings > Actions > Runners.
+#
+#   2. Download + configure with the matching labels:
+#        ./config.sh --url https://github.com/rwcii/afterglow \
+#            --token <RUNNER_TOKEN> \
+#            --labels self-hosted,linux,x64,afterglow-rig \
+#            --name afterglow-rig-01 --work _work
+#
+#   3. Install as a service so it survives reboots:
+#        sudo ./svc.sh install && sudo ./svc.sh start
+#
+#   4. Persist the port-role env for the runner service (match the physical
+#      board layout), e.g. in the runner's .env:
+#        AG_DUT_PORT=/dev/ttyACM0
+#        AG_STIMULUS_PORT=/dev/ttyACM1
+#        AG_OBSERVER_PORT=/dev/ttyACM2
+#        AG_PEER_A_PORT=/dev/ttyACM0
+#        AG_PEER_B_PORT=/dev/ttyACM1
+#
+#   5. Ensure the service account is in the `dialout` group for serial access.
+#
+# Until step 2 registers the `afterglow-rig` label, every job above stays queued
+# against a runner that does not exist and never executes.
+# ---------------------------------------------------------------------------

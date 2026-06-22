@@ -19,73 +19,30 @@ Run (ports are the two boards; DUT first):
 
 Requires: pytest, pyserial. The two firmwares must already be flashed.
 """
-import os
 import re
+import sys
 import time
+from pathlib import Path
 
 import pytest
-import serial
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from rig import Roles  # noqa: E402
 
 
-DUT_PORT = os.environ.get("AG_DUT_PORT", "/dev/ttyACM0")
-STIM_PORT = os.environ.get("AG_STIM_PORT", "/dev/ttyACM1")
-BAUD = 115200
-
-
-class Board:
-    def __init__(self, port):
-        # ESP32-S3 USB-Serial-JTAG: assert DTR so the device accepts host writes,
-        # and bound the write so a wedged port surfaces as an error, not a hang.
-        s = serial.Serial()
-        s.port = port
-        s.baudrate = BAUD
-        s.timeout = 0.2
-        s.write_timeout = 3
-        s.dtr = True
-        s.rts = False
-        s.open()
-        time.sleep(2)  # let the board settle after the open-induced reset
-        self.ser = s
-        self.buf = ""
-
-    def send(self, ch):
-        self.ser.write(ch.encode())
-        self.ser.flush()
-
-    def pump(self):
-        data = self.ser.read(4096)
-        if data:
-            self.buf += data.decode(errors="replace")
-
-    def wait(self, pattern, timeout):
-        """Wait until a regex matches a complete line; return the match or None."""
-        deadline = time.time() + timeout
-        rx = re.compile(pattern)
-        while time.time() < deadline:
-            self.pump()
-            for line in self.buf.splitlines():
-                m = rx.search(line)
-                if m:
-                    return m
-            time.sleep(0.1)
-        return None
-
-    def drain(self):
-        self.pump()
-        self.buf = ""
-
-    def close(self):
-        self.ser.close()
+# All tests in this module share one DUT + stimulus session (module scope), so
+# captured-source / replayable-ghost state built up by an earlier test persists
+# into later ones — the historical single-session behaviour. The marker is set at
+# module level so the module-scoped rig fixture can read the declared roles.
+pytestmark = pytest.mark.rig_roles("dut", "stimulus")
 
 
 @pytest.fixture(scope="module")
-def boards():
-    dut = Board(DUT_PORT)
-    stim = Board(STIM_PORT)
+def boards(rig_module):
+    dut, stim = rig_module[Roles.DUT], rig_module[Roles.STIMULUS]
     yield dut, stim
     stim.send("x")
-    dut.close()
-    stim.close()
 
 
 def _census(line):

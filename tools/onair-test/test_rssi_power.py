@@ -41,80 +41,26 @@ Requires: pytest, pyserial. The three firmwares must already be flashed.
 """
 import os
 import re
+import sys
 import time
+from pathlib import Path
 
-import serial
+import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-DUT_PORT = os.environ.get("AG_DUT_PORT", "/dev/ttyACM0")
-STIM_PORT = os.environ.get("AG_STIM_PORT", "/dev/ttyACM1")
-OBS_PORT = os.environ.get("AG_OBS_PORT", "/dev/ttyACM2")
-BAUD = 115200
+from rig import Board, RigConfig, Roles, ADV_RE, EMIT_RE, median  # noqa: E402
+
 
 # Window over which to collect the swept ghost on air. The ramp advances one
 # ladder step per BLE replay slot, so this needs to cover several full sweeps
 # of the 16-level ladder for a stable per-level median.
 COLLECT_S = float(os.environ.get("AG_RSSI_COLLECT_S", "90"))
 
-EMIT_RE = re.compile(r"ONAIR emit addr=([0-9a-f:]+) pwr_idx=(-?\d+)")
-ADV_RE = re.compile(
-    r"ADV (?:rnd|pub) ([0-9a-f:]+) rssi=(-?\d+) len=\d+ data=\S+(?: txp=(-?\d+))?"
-)
-
 
 def dbm_for_idx(idx):
     """The dBm the DUT writes into the 0x0A field for a commanded ladder index."""
     return -24 + 3 * idx
-
-
-class Board:
-    def __init__(self, port, settle=2.0):
-        s = serial.Serial()
-        s.port = port
-        s.baudrate = BAUD
-        s.timeout = 0.2
-        s.write_timeout = 3
-        s.dtr = True
-        s.rts = False
-        s.open()
-        time.sleep(settle)  # let the board settle after the open-induced reset
-        self.ser = s
-        self.buf = ""
-
-    def send(self, ch):
-        self.ser.write(ch.encode())
-        self.ser.flush()
-
-    def pump(self):
-        data = self.ser.read(8192)
-        if data:
-            self.buf += data.decode(errors="replace")
-
-    def wait(self, pattern, timeout):
-        deadline = time.time() + timeout
-        rx = re.compile(pattern)
-        while time.time() < deadline:
-            self.pump()
-            for line in self.buf.splitlines():
-                m = rx.search(line)
-                if m:
-                    return m
-            time.sleep(0.1)
-        return None
-
-    def lines(self):
-        """Return complete lines seen so far, keeping any partial tail buffered."""
-        self.pump()
-        parts = self.buf.split("\n")
-        self.buf = parts[-1]
-        return parts[:-1]
-
-    def drain(self):
-        self.pump()
-        self.buf = ""
-
-    def close(self):
-        self.ser.close()
 
 
 def _start_cloneable(dut, stim, cmd="s"):
@@ -173,18 +119,12 @@ def collect(dut, obs, addr, seconds):
     return by_idx, txp_mismatches
 
 
-def _median(xs):
-    xs = sorted(xs)
-    n = len(xs)
-    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
-
-
 def analyze(by_idx):
     """Return (levels_with_data, rise_dbm, spearman_like) where rise_dbm is the
     median-RSSI span from the lowest to the highest populated ladder level and
     spearman_like is the rank correlation between commanded index and median RSSI
     over populated levels (1.0 = perfectly monotone increasing)."""
-    pts = sorted((idx, _median(rs)) for idx, rs in by_idx.items() if rs)
+    pts = sorted((idx, median(rs)) for idx, rs in by_idx.items() if rs)
     if len(pts) < 2:
         return pts, 0.0, 0.0
     rise = pts[-1][1] - pts[0][1]
@@ -203,23 +143,15 @@ def analyze(by_idx):
     return pts, rise, tau
 
 
-def run(collect_s=COLLECT_S):
-    dut = Board(DUT_PORT)
-    stim = Board(STIM_PORT)
-    obs = Board(OBS_PORT)
-    try:
-        # The observer logs its boot banner once at startup, which may have
-        # scrolled past before we attached; confirm it is alive by the ADV lines
-        # it emits for ambient traffic instead.
-        assert obs.wait(r"ADV (?:rnd|pub) ", timeout=15), \
-            "observer is not reporting any advertisements"
-        addr = _start_cloneable(dut, stim)
-        by_idx, txp_mismatches = collect(dut, obs, addr, collect_s)
-    finally:
-        stim.send("x")
-        dut.close()
-        stim.close()
-        obs.close()
+def _run(dut, stim, obs, collect_s=COLLECT_S):
+    """Drive the sweep on already-open boards and print the verdict table."""
+    # The observer logs its boot banner once at startup, which may have
+    # scrolled past before we attached; confirm it is alive by the ADV lines
+    # it emits for ambient traffic instead.
+    assert obs.wait(r"ADV (?:rnd|pub) ", timeout=15), \
+        "observer is not reporting any advertisements"
+    addr = _start_cloneable(dut, stim)
+    by_idx, txp_mismatches = collect(dut, obs, addr, collect_s)
 
     pts, rise, tau = analyze(by_idx)
     print("\n=== RSSI vs commanded power index ===", flush=True)
@@ -236,10 +168,23 @@ def run(collect_s=COLLECT_S):
     return pts, rise, tau, txp_mismatches
 
 
-# --- pytest entry -----------------------------------------------------------
+def run(collect_s=COLLECT_S):
+    """Standalone entry: open the three rig boards, run the sweep, print verdict."""
+    cfg = RigConfig()
+    dut = Board(cfg.require_port(Roles.DUT))
+    stim = Board(cfg.require_port(Roles.STIMULUS))
+    obs = Board(cfg.require_port(Roles.OBSERVER))
+    try:
+        return _run(dut, stim, obs, collect_s)
+    finally:
+        stim.send("x")
+        dut.close()
+        stim.close()
+        obs.close()
 
-def test_rssi_tracks_commanded_power():
-    pts, rise, tau, txp_mismatches = run()
+
+def _check(pts, rise, tau, txp_mismatches):
+    """The pass criteria, shared by the standalone and pytest paths."""
     assert len(pts) >= 4, \
         f"too few ladder levels observed ({len(pts)}); sweep or scan too short"
     # The 0x0A AD field must always equal the commanded power's dBm.
@@ -253,6 +198,18 @@ def test_rssi_tracks_commanded_power():
     assert rise >= 6.0, \
         f"RSSI span across the ladder only {rise:.1f} dB; expected the power " \
         f"change to radiate as a clear RSSI gradient"
+
+
+# --- pytest entry -----------------------------------------------------------
+
+@pytest.mark.rig_roles("dut", "stimulus", "observer")
+def test_rssi_tracks_commanded_power(rig):
+    dut, stim, obs = rig[Roles.DUT], rig[Roles.STIMULUS], rig[Roles.OBSERVER]
+    try:
+        pts, rise, tau, txp_mismatches = _run(dut, stim, obs)
+    finally:
+        stim.send("x")
+    _check(pts, rise, tau, txp_mismatches)
 
 
 if __name__ == "__main__":
