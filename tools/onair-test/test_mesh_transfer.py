@@ -160,8 +160,8 @@ def _direction_ok(sender, receiver):
     Validated on whatever records actually transfer. In a beacon-dense room the
     pool fills with real ambient captures and the recency-weighted, capped subset
     selection picks those over the boot-time seed (the seed is the oldest, lowest-
-    weight record) — so the seed is a presence sanity-check, not the carrier. The
-    M4.2 guarantees (fragment -> reassemble -> gated absorb -> dedup -> wire/pool
+    weight record) — so the seed is a presence sanity-check, not the carrier.
+    The transfer guarantees (fragment -> reassemble -> gated absorb -> dedup -> wire/pool
     rec_id equality) are asserted on the records that genuinely cross the air.
     """
     if not sender["data_tx"]:

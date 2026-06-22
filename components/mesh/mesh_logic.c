@@ -191,12 +191,13 @@ int ag_reasm_slot_for(ag_reasm_t *slots, int cap, uint16_t rec_id)
 
 // Largest fragment count the staging buffer + have_mask can actually hold:
 // have_mask is a uint8_t (8 bits) and a fragment's body must land within the
-// 31-byte payload (frag_idx * AG_MESH_FRAG_BODY < 31). Both cap the real ceiling
-// well below the 4-bit wire field's 15, so a frame declaring more fragments than
-// this is malformed and must be rejected rather than silently truncated.
-#define AG_REASM_MAX_FRAGS \
-    ((31 + AG_MESH_FRAG_BODY - 1) / AG_MESH_FRAG_BODY < 8 \
-        ? (31 + AG_MESH_FRAG_BODY - 1) / AG_MESH_FRAG_BODY : 8)
+// The reassembly admission ceiling IS the shared emit/reassembly ceiling
+// (AG_MESH_FRAG_CEIL, derived once in mesh_logic.h from the 31-byte payload and
+// AG_MESH_FRAG_BODY). A frame declaring more fragments than a <=31B record can
+// span is malformed and is rejected rather than silently truncated. The value
+// (2 at BODY=16) is well within the 8-bit have_mask, so no separate mask cap is
+// needed; if AG_MESH_FRAG_BODY ever shrinks past 4B this must stay <= 8.
+#define AG_REASM_MAX_FRAGS AG_MESH_FRAG_CEIL
 
 ag_reasm_verdict_t ag_reasm_add(ag_reasm_t *r, uint16_t rec_id, uint8_t frag_byte,
                                 const uint8_t *body, uint8_t body_len)

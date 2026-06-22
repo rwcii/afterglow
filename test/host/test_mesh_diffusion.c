@@ -197,7 +197,7 @@ int main(void)
         // still each accepts exactly once and at hop 1.
         build_full(n);
         int full_reach = check_diffusion(n, "full-mesh", 0);
-        CHECK_MSG(full_reach == n - 1 || (AG_TTL_INIT >= 1 && full_reach == n - 1),
+        CHECK_MSG(full_reach == n - 1,
                   "full mesh N=%d should reach all n-1 peers, got %d", n, full_reach);
         // every accepting node in a full mesh is exactly 1 hop from origin.
         for (int i = 1; i < n; i++)

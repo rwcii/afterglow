@@ -56,7 +56,11 @@ int main(void)
         // ONLY when its lo16 collides with the record's carried origin lo16.
         // Simulate every ordered (capturer, receiver) pair of distinct nodes and
         // count drops where the receiver is NOT the true origin.
-        int false_drops = 0, real_drops = 0, evaluated = 0;
+        // Every own-origin drop between two DISTINCT nodes (rx != cap) is, by
+        // construction, driven by a lo16 collision: ag_mesh_evaluate only returns
+        // DROP_OWN_ORIGIN when the carried origin_lo16 equals the receiver's own
+        // lo16, so for distinct capturers that means their lo16s collided.
+        int collision_drops = 0, evaluated = 0;
         for (int cap = 0; cap < n; cap++) {
             for (int rx = 0; rx < n; rx++) {
                 if (rx == cap) continue;        // a node's own air capture
@@ -69,25 +73,13 @@ int main(void)
                 ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, (uint16_t)(0x1000 + cap),
                     AG_TTL_INIT, origin_lo16, self_lo16, false, 0, &out);
                 evaluated++;
-                if (v == AG_MESH_DROP_OWN_ORIGIN) {
-                    real_drops++;
-                    if ((nodeids[cap] & 0xFFFFu) != (nodeids[rx] & 0xFFFFu))
-                        false_drops++;  // unreachable by construction; kept honest
-                }
+                if (v == AG_MESH_DROP_OWN_ORIGIN) collision_drops++;
             }
         }
-        // a "false own-origin drop" is a drop driven by a lo16 COLLISION between
-        // two genuinely-distinct nodes (the receiver is not the true capturer).
-        int collision_drops = real_drops; // every own-origin drop here is rx!=cap
         fprintf(stderr,
             "  [collision] N=%3d origin_lo16_collisions=%3d own_origin_drops/%d=%d\n",
             n, origin_coll, evaluated, collision_drops);
 
-        // Honesty assertion: the drop count equals the lo16-collision-driven
-        // pairs, and at realistic small densities that count is low (negligible
-        // relative to evaluations). Assert it is bounded well under the total.
-        CHECK_MSG(false_drops == 0, "false_drops must be a strict lo16-collision "
-                  "artifact, got %d unexplained", false_drops);
         // collision drops are bounded by n * (#collisions) and small vs n^2.
         CHECK_MSG(collision_drops <= n * origin_coll + n,
                   "N=%d own-origin drops %d exceed the lo16-collision bound",

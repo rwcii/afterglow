@@ -33,6 +33,12 @@ extern "C" {
 // MUST use this one constant so the fragment offset math can never drift.
 #define AG_MESH_FRAG_BODY 16
 
+// Records are at most 31 payload bytes (ag_beacon_record_t.payload[31]), so a
+// record spans at most this many fragments. Derived from the one body constant
+// and the payload size so the emit-side clamp and the reassembly admission gate
+// share a single ceiling and cannot disagree. (<= the 4-bit wire field's 15.)
+#define AG_MESH_FRAG_CEIL ((31 + AG_MESH_FRAG_BODY - 1) / AG_MESH_FRAG_BODY)
+
 // One slot in the contact table: a peer discovered on air (low-24 of its
 // NodeID) and the timestamp of the last transfer we made to it. `used` marks
 // the slot occupied. mesh.c owns an array of these (sized by MESH_CONTACTS).
@@ -95,9 +101,12 @@ uint8_t ag_mesh_select_subset_fn(const ag_beacon_record_t *(*get)(void *, uint16
                                  float fraction, uint8_t cap, ag_prng_t *rng,
                                  uint16_t *out_idx, uint8_t out_max);
 
-// Fragment count for a payload: ceil(payload_len / body_bytes), clamped to
-// AG_MESH_FRAG_MAX. body_bytes is the per-fragment body budget (~20 for a 31B
-// adv). Returns 0 for an empty payload; clamps body_bytes==0 to 1.
+// Fragment count for a payload: ceil(payload_len / body_bytes), clamped to the
+// 4-bit wire field's AG_MESH_FRAG_MAX (15). body_bytes is the per-fragment body
+// budget (AG_MESH_FRAG_BODY = 16 for a 31B adv). Returns 0 for an empty payload;
+// clamps body_bytes==0 to 1. NOTE: this clamps to what the WIRE FIELD can carry;
+// the production emit path passes AG_MESH_FRAG_BODY over <=31B records, yielding
+// at most AG_MESH_FRAG_CEIL fragments, which is what reassembly admits.
 uint8_t ag_mesh_frag_count(uint8_t payload_len, uint8_t body_bytes);
 
 // --- fragment reassembly state machine ------------------------------------
