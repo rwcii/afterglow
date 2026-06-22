@@ -85,7 +85,19 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
         // broadcast-only sighting can't relax it back into eligibility.
         r->adv_kind = (uint8_t)ag_adv_kind_merge((ag_adv_kind_t)r->adv_kind,
                                                  cap->adv_kind);
-        r->flags = (uint8_t)(r->flags & ~AG_FLAG_DEPARTING);  // it's back
+        // It's back — clear DEPARTING. A local re-sighting also makes this record
+        // genuinely own-origin: we air-captured it ourselves now. If it had been
+        // absorbed over the mesh (RELAYED set, origin_node = the foreign first-
+        // capturer's id), take over BOTH provenance signals together so they
+        // never disagree — clear RELAYED and reclaim origin_node as our own node.
+        // (Leaving origin_node foreign while clearing RELAYED would let carryable
+        // treat the record as own yet key its return-to-source guard off a
+        // foreign origin.)
+        if (r->flags & AG_FLAG_RELAYED) {
+            r->origin_node = node_id;
+            r->hop_ttl = 0;        // own fresh capture: ttl0 is carryable, not exhausted
+        }
+        r->flags = (uint8_t)(r->flags & ~(AG_FLAG_DEPARTING | AG_FLAG_RELAYED));
         return idx;
     }
 
@@ -106,6 +118,8 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     r->rec_id = ag_pool_rec_id(addr_type, orig_addr, cap->frame, plen);
     r->origin_node = node_id;
     r->hop_ttl = 0;            // air-captured local origin
+    // RELAYED stays clear (memset above): a local air-capture is own-origin, so
+    // this record is carryable at ttl0 (a fresh capture seeds its first hop).
     r->rssi_last = cap->rssi;
     r->rssi_ewma = cap->rssi;
     r->obs_count = 1;

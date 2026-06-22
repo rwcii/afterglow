@@ -127,18 +127,38 @@ int main(void)
     }
 
     // (7) subset: a relayed record (foreign origin) at hop_ttl==0 is exhausted
-    //     and skipped; a fresh air capture (self origin) at hop_ttl==0 is still
-    //     carryable.
+    //     and skipped; a fresh air capture at hop_ttl==0 is still carryable.
+    //     Provenance is the RELAYED flag, not an origin compare.
     {
         enum { N = 2 };
         ag_beacon_record_t slab[N];
-        slab[0] = mk_rec(REPLAY, 4, 0x00010000u | 0x7777u, 0, 8000); // relayed, exhausted
+        slab[0] = mk_rec(REPLAY | AG_FLAG_RELAYED, 4, 0x00010000u | 0x7777u, 0, 8000); // relayed, exhausted
         slab[1] = mk_rec(REPLAY, 4, 0x00010000u | SELF, 0, 8000);    // own air capture
         uint16_t out[N];
         uint8_t n = ag_mesh_select_subset(slab, N, SELF, PEER, 1.0f, 16, &rng,
                                           out, N);
-        CHECK_MSG(n == 1, "only the own-origin ttl0 record is carryable, got %u", n);
+        CHECK_MSG(n == 1, "only the own-capture ttl0 record is carryable, got %u", n);
         CHECK(out[0] == 1);
+    }
+
+    // (7b) lo16-collision regression (the #54 fix): an exhausted FOREIGN relay
+    //      whose origin_lo16 happens to equal SELF must still be dropped at ttl0
+    //      (it is replay-only), and a genuine own air-capture whose origin_lo16
+    //      equals SELF must still be carryable. The OLD logic keyed ttl0-carry on
+    //      origin_lo16==self, so it would have WRONGLY kept the foreign relay.
+    //      Now provenance is the RELAYED flag, so the collision no longer fools it.
+    {
+        enum { N = 2 };
+        ag_beacon_record_t slab[N];
+        // foreign relay, exhausted, but origin_lo16 collides with SELF.
+        slab[0] = mk_rec(REPLAY | AG_FLAG_RELAYED, 4, 0x99990000u | SELF, 0, 9000);
+        // genuine own air-capture, origin_lo16 == SELF, NOT relayed.
+        slab[1] = mk_rec(REPLAY, 4, 0x00010000u | SELF, 0, 9000);
+        uint16_t out[N];
+        uint8_t n = ag_mesh_select_subset(slab, N, SELF, PEER, 1.0f, 16, &rng,
+                                          out, N);
+        CHECK_MSG(n == 1, "lo16 collision: only the own capture is carryable, got %u", n);
+        CHECK_MSG(out[0] == 1, "the colliding foreign relay must be dropped, not carried");
     }
 
     // (8) no carry-eligible records -> empty selection.

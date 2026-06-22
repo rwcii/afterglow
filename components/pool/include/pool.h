@@ -31,6 +31,11 @@ enum {
     AG_FLAG_REPLAY_ELIGIBLE = 1 << 0,
     AG_FLAG_REPLAY_LOSSY    = 1 << 1,
     AG_FLAG_DEPARTING       = 1 << 2,
+    // Provenance: this record arrived over the mesh from a foreign origin
+    // (set on absorption). Cleared on local air-capture. Carry-eligibility keys
+    // ttl0-replay-only on this flag rather than inferring own-vs-relayed from a
+    // 16-bit origin coincidence (two nodes can share a NodeID's low bits).
+    AG_FLAG_RELAYED         = 1 << 3,
 };
 
 // Pool record — mirrors `afterglow_record_t` common header.

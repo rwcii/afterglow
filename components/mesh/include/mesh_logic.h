@@ -26,8 +26,9 @@ extern "C" {
 // Wire protocol version. Carried on BOTH the HELLO heartbeat and every DATA
 // fragment so a peer can recognize and reject a frame whose layout it does not
 // understand. Bump whenever the on-wire HELLO/DATA layout changes (the layout
-// that added addr_type + origin_lo16 to DATA). Lives here (portable) so the
-// emit side, the parser, and the host tests share one source of truth.
+// that added addr_type + origin_lo16 to DATA; then widened the DATA origin field
+// to lo24). Lives here (portable) so the emit side, the parser, and the host
+// tests share one source of truth.
 //
 // VALUE CONSTRAINT (load-bearing): the DATA version byte sits immediately after
 // the type byte, at the same wire offset an OLDER DATA layout (which carried no
@@ -38,7 +39,7 @@ extern "C" {
 // version MUST stay OUTSIDE 0..AG_MESH_VERSION_MIN (see the compile-time check
 // in mesh_logic.c): a high reserved value (0x80) that no legacy ttl/index byte
 // at that offset can take. Keep new versions in the reserved high band.
-#define AG_MESH_VERSION 0x80
+#define AG_MESH_VERSION 0x81
 
 // Smallest version value that is safely distinguishable from a legacy DATA frame
 // at the version offset. A legacy DATA frame placed `ttl` (0..AG_TTL_INIT) where
@@ -51,7 +52,7 @@ extern "C" {
 #define AG_MESH_FRAG_MAX 15
 
 // Body bytes carried per DATA fragment. The DATA frame header (type, version,
-// ttl, frag_byte, rec_id:2, addr_type, origin_lo16:2) leaves room for this many
+// ttl, frag_byte, rec_id:2, addr_type, origin_lo24:3) leaves room for this many
 // payload bytes in a 31-byte adv. BOTH the emit side and the reassembly side
 // MUST use this one constant so the fragment offset math can never drift.
 #define AG_MESH_FRAG_BODY 16

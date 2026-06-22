@@ -53,6 +53,31 @@ int main(void)
               "ewma did not move toward sample: %d", slab[0].rssi_ewma);
     CHECK(slab[0].interval_q > 0); // cadence estimated from the 1000ms gap
 
+    // (3b) re-sighting a mesh-absorbed (RELAYED) record reclaims provenance: a
+    //      record that arrived over the mesh (RELAYED set, origin_node = a FOREIGN
+    //      first-capturer, hop_ttl exhausted) and is then air-captured locally
+    //      becomes genuinely own-origin. The merge must clear RELAYED AND reset
+    //      origin_node to our node id AND reset hop_ttl to 0, so the provenance
+    //      flag and origin_node never disagree (else carryable would treat it as
+    //      own while its return-to-source guard keyed off the foreign origin).
+    {
+        const uint32_t SELF_NODE = 0x0ABCD123u;
+        const uint32_t FOREIGN   = 0x0FEED999u;
+        // Force slab[0] into the "absorbed relay" state directly.
+        slab[0].flags |= AG_FLAG_RELAYED;
+        slab[0].origin_node = FOREIGN;
+        slab[0].hop_ttl = 0;            // exhausted relay
+        ag_capture_t cr = mk_cap(AG_PROTO_BLE, -50, fa, 10, 4000);
+        int m = ag_pool_admit(slab, &count, CAP, &cr, addr_a, 1, 4000,
+                              SELF_NODE, &evp, &rng);
+        CHECK_MSG(m == 0, "re-sight should merge into slot 0, got %d", m);
+        CHECK_MSG(!(slab[0].flags & AG_FLAG_RELAYED),
+                  "RELAYED must clear on local re-sighting");
+        CHECK_MSG(slab[0].origin_node == SELF_NODE,
+                  "origin_node must be reclaimed as our node on re-sight");
+        CHECK_MSG(slab[0].hop_ttl == 0, "re-sighted own capture must be ttl0");
+    }
+
     // (4) distinct identity inserts a second record.
     ag_capture_t c3 = mk_cap(AG_PROTO_BLE, -55, fb, 10, 2500);
     int k = ag_pool_admit(slab, &count, CAP, &c3, addr_b, 1, 2500, 0, &evp, &rng);
