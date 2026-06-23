@@ -25,6 +25,7 @@ add_library(afterglow_core STATIC
     ${CORE_DIR}/ag_subset.c
     ${CORE_DIR}/ag_meshguard.c
     ${CORE_DIR}/ag_eligible.c
+    ${CORE_DIR}/ag_txad.c
 )
 target_include_directories(afterglow_core PUBLIC ${CORE_DIR}/include)
 target_link_libraries(afterglow_core PUBLIC m)
@@ -59,22 +60,31 @@ target_link_libraries(components_host PUBLIC afterglow_core m)
 enable_testing()
 
 # --- unit tests -----------------------------------------------------------
-foreach(t test_eviction test_txwalk test_subset test_meshguard)
+foreach(t test_eviction test_txwalk test_subset test_meshguard test_txad
+          test_mesh_diffusion test_mesh_collision)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
 # --- component-logic tests (host shims) -----------------------------------
-foreach(t test_config test_pool test_classifier test_lifecycle test_mesh)
+foreach(t test_config test_pool test_classifier test_adv_kind test_lifecycle test_mesh)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE components_host afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
 # --- separability tests ---------------------------------------------------
-foreach(t test_separability test_eligibility)
+foreach(t test_separability test_eligibility test_aggregate_separability)
     add_executable(${t} separability/${t}.c)
     target_link_libraries(${t} PRIVATE separability afterglow_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+# --- parity-vector generator ----------------------------------------------
+# Runs the real detector.c primitives on fixed inputs and emits the C-computed
+# expected vectors that lock the Python detector port (rig/separability.py).
+# Regenerate the committed vectors with:
+#   ./build/host/gen_vectors > test/host/separability/parity/expected_vectors.json
+add_executable(gen_vectors separability/parity/gen_vectors.c)
+target_link_libraries(gen_vectors PRIVATE separability)

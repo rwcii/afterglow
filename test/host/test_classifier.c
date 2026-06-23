@@ -15,7 +15,12 @@ static const uint8_t BEACON_AD[] = { 0x05, 0xFF, 0x4C, 0x00, 0x02, 0x15 };
 // A payload with no manufacturer/service-data AD field (just a flags field).
 static const uint8_t PLAIN_AD[]  = { 0x02, 0x01, 0x06 };
 
-// Build a fresh random-BLE record. msb sets orig_addr[5] (random subtype bits).
+// Build a fresh random-BLE record. msb sets orig_addr[0], the most-significant
+// AdvA octet whose top two bits carry the random subtype — orig_addr is stored
+// MSB-first (esp_bd_addr_t order), matching the on-device capture path.
+// The stored payload mirrors the captured frame layout used everywhere on-device:
+// AdvA(6) || AdvData. The classifier reads beacon framing from after the AdvA,
+// so the AD list must sit at offset 6 (not byte 0).
 static ag_beacon_record_t mk_ble(uint8_t msb, ag_adv_kind_t kind,
                                  const uint8_t *ad, uint8_t adlen)
 {
@@ -25,9 +30,10 @@ static ag_beacon_record_t mk_ble(uint8_t msb, ag_adv_kind_t kind,
     r.addr_type = 1;                 // random
     r.cls = AG_CLASS_TENTATIVE;
     r.adv_kind = (uint8_t)kind;
-    r.orig_addr[5] = msb;
-    memcpy(r.payload, ad, adlen);
-    r.payload_len = adlen;
+    r.orig_addr[0] = msb;
+    memcpy(r.payload, r.orig_addr, 6);       // AdvA prefix (as captured)
+    memcpy(r.payload + 6, ad, adlen);        // AdvData follows
+    r.payload_len = (uint8_t)(6 + adlen);
     return r;
 }
 
@@ -41,7 +47,7 @@ static void observe_n(ag_beacon_record_t *r, int n)
 {
     for (int i = 0; i < n; i++) {
         if (r->obs_count < 255) r->obs_count++;
-        ag_classify_observe(r, MIN_SIGHT);
+        ag_classify_observe(r, MIN_SIGHT, /*require_beacon_payload=*/true);
     }
 }
 
@@ -82,6 +88,18 @@ int main(void)
         CHECK_MSG(r.cls == AG_CLASS_RPA_BLE, "RPA stays RPA (cls=%u)", r.cls);
         CHECK_MSG(!eligible(&r), "RPA must never be replay-eligible");
         CHECK(ag_classify_elig_class(r.cls) == AG_ELIG_RPA);
+        CHECK(!ag_classify_class_reproducible(r.cls));
+    }
+
+    // --- (3b) reserved subtype (0b10): not a settable random address type, so
+    //          it must stay TENTATIVE and never become reproducible/eligible.
+    {
+        ag_beacon_record_t r = mk_ble(0x80, AG_ADV_NONCONN_NONSCAN, // 0b10 reserved
+                                      BEACON_AD, sizeof BEACON_AD);
+        observe_n(&r, 10);
+        CHECK_MSG(r.cls == AG_CLASS_TENTATIVE,
+                  "reserved subtype must not promote (cls=%u)", r.cls);
+        CHECK_MSG(!eligible(&r), "reserved subtype must never be replay-eligible");
         CHECK(!ag_classify_class_reproducible(r.cls));
     }
 
@@ -148,12 +166,14 @@ int main(void)
         CHECK(ag_classify_beacon_payload(svc, sizeof svc));
     }
 
-    // --- (10) subtype hint reads only the address MSB top two bits.
+    // --- (10) subtype hint reads only the address MSB (orig_addr[0]) top two
+    // bits — the byte stored first under esp_bd_addr_t / MSB-first capture order.
     {
-        uint8_t a[6] = {0,0,0,0,0,0xC0};
+        uint8_t a[6] = {0xC0,0,0,0,0,0};
         CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_STATIC);
-        a[5] = 0x00; CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_NRPA);
-        a[5] = 0x40; CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_RPA);
+        a[0] = 0x00; CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_NRPA);
+        a[0] = 0x40; CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_RPA);
+        a[0] = 0x80; CHECK(ag_classify_rand_subtype(a) == AG_RANDSUB_RESVD);
     }
 
     // --- (11) elig-class mapping is total and never crashes on unknowns.
@@ -168,7 +188,7 @@ int main(void)
                                       BEACON_AD, sizeof BEACON_AD);
         observe_n(&r, MIN_SIGHT);
         ag_beacon_record_t snap = r;
-        ag_classify_observe(&r, MIN_SIGHT);     // same obs_count, no new sighting
+        ag_classify_observe(&r, MIN_SIGHT, true); // same obs_count, no new sighting
         CHECK(r.cls == snap.cls && r.flags == snap.flags);
     }
 

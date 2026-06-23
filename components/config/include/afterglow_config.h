@@ -45,6 +45,8 @@ typedef struct {
     bool     own_device_exclude;    // true
     uint32_t own_device_window_ms;  // 600000
     uint8_t  depart_gap_mult;       // 5 (3-8)
+    bool     rotation_enabled;      // true — ROTATING (NRPA) ghosts rotate address
+                                    // on a per-ghost ~15 min timer
 
     // Group D — Replay (D)
     uint8_t  ble_adv_sets;          // 1 (legacy single instance)
@@ -55,6 +57,10 @@ typedef struct {
     uint32_t spawn_jitter_ms_max;   // 60000
     bool     wifi_beacons_enabled;  // FALSE (pending E3/IDF gate)
     bool     ble_enabled;           // true
+    bool     require_broadcast_only;// TRUE — relay only non-connectable,
+                                    // non-scannable advertisements
+    bool     require_beacon_payload;// TRUE — additionally require a recognized
+                                    // broadcast-beacon payload before relay
     ag_fast_policy_t fast_cadence_policy; // SLOW_AND_FLAG
 
     // Group E — TX entropy (E)

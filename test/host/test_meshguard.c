@@ -36,6 +36,43 @@ int main(void)
         CHECK(hops >= 1);
     }
 
+    // (1b) wire-TTL clamp: the hop-TTL is a single attacker-controllable byte
+    //      (0..255), but diffusion must stay bounded to AG_TTL_INIT hops. A frame
+    //      declaring an inflated ttl (e.g. 255) must be clamped to the ceiling on
+    //      acceptance, never stored above it — otherwise one crafted frame could
+    //      amplify across far more than AG_TTL_INIT hops.
+    {
+        ag_seen_t seen;
+        ag_seen_init(&seen, ids, stamps, 64);
+        uint8_t out = 0xFF;
+        ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, /*rec_id*/0x2345,
+            /*inbound_ttl*/255, /*origin*/0xAAAA, /*self*/0x1,
+            /*in_pool*/false, /*pool_ttl*/0, &out);
+        CHECK(v == AG_MESH_ACCEPT);
+        // stored ttl = clamp(255, TTL_INIT) - 1 = TTL_INIT - 1.
+        CHECK_MSG(out == (uint8_t)(AG_TTL_INIT - 1),
+                  "inflated wire ttl=255 stored as %u (must clamp to TTL_INIT-1=%d)",
+                  out, AG_TTL_INIT - 1);
+        // And the clamp must bound the in-pool refresh path too. Use a pool_ttl
+        // ABOVE the ceiling so the clamp is the ONLY thing that bounds the result:
+        // without the clamp, refresh-lower would store min(255, pool_ttl) =
+        // pool_ttl (> AG_TTL_INIT); with the clamp, inbound is capped to
+        // AG_TTL_INIT first, so the stored ttl is min(AG_TTL_INIT, pool_ttl) =
+        // AG_TTL_INIT. (pool_ttl can only exceed the ceiling if a prior bug stored
+        // it there; the clamp is the backstop that re-bounds it on refresh.) This
+        // assertion FAILS if the clamp is removed — the weaker pool_ttl < ceiling
+        // case would pass either way and does not exercise the clamp.
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        uint8_t out2 = 0xFF;
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x2346, /*inbound*/255,
+            0x1, 0x2, /*in_pool*/true, /*pool_ttl*/200, &out2);
+        CHECK(v2 == AG_MESH_REFRESH_LOWER);
+        CHECK_MSG(out2 == AG_TTL_INIT,
+                  "inflated ttl refresh stored %u (clamp must bound it to "
+                  "TTL_INIT=%d, not min(255,pool_ttl))", out2, AG_TTL_INIT);
+    }
+
     // (2) origin pinning: a node never absorbs a record it air-captured.
     {
         ag_seen_t seen;
@@ -44,6 +81,44 @@ int main(void)
         ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, 0x55, AG_TTL_INIT,
             /*origin*/0xBEEF, /*self*/0xBEEF, false, 0, &out);
         CHECK(v == AG_MESH_DROP_OWN_ORIGIN);
+    }
+
+    // (2b) origin keying width (the #54 lo16-collision fix): the absorb wrapper
+    //      keys the own-origin guard on the wire origin's LOW 24 bits (biased
+    //      above the lo24 space). Two distinct nodes that collide in their low 16
+    //      bits but differ in bit[16..23] must NOT be treated as own-origin — a
+    //      record from such a peer must still be ACCEPTed (it would have FALSE
+    //      DROP_OWN_ORIGIN'd under the old lo16 keying). Model the exact keying
+    //      mesh_absorb_inbound applies.
+    {
+        // self and a foreign origin that share lo16 (0x4321) but differ in lo24.
+        const uint32_t self_full   = 0x00114321u;  // lo24 = 0x114321
+        const uint32_t origin_full = 0x00224321u;  // lo24 = 0x224321, same lo16
+        uint32_t origin_keyed = (origin_full & 0xFFFFFFu) | 0x1000000u;
+        uint32_t self_keyed   = (self_full   & 0xFFFFFFu) | 0x1000000u;
+        // Sanity: the old lo16 keying WOULD have collided (false own-origin).
+        CHECK_MSG(((origin_full & 0xFFFFu) | 0x10000u) ==
+                  ((self_full & 0xFFFFu) | 0x10000u),
+                  "test premise: the two nodes collide under lo16 keying");
+        // The new lo24 keying must distinguish them.
+        CHECK_MSG(origin_keyed != self_keyed,
+                  "lo24 keying must distinguish nodes that share only lo16");
+        ag_seen_t seen;
+        ag_seen_init(&seen, ids, stamps, 64);
+        uint8_t out;
+        ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, 0x56, AG_TTL_INIT,
+            origin_keyed, self_keyed, false, 0, &out);
+        CHECK_MSG(v == AG_MESH_ACCEPT,
+                  "a peer sharing only lo16 must not false-trip own-origin");
+
+        // And a genuine own-origin record (full lo24 match) still DROPs.
+        uint32_t own_keyed = (self_full & 0xFFFFFFu) | 0x1000000u;
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x57, AG_TTL_INIT,
+            own_keyed, self_keyed, false, 0, &out);
+        CHECK_MSG(v2 == AG_MESH_DROP_OWN_ORIGIN,
+                  "a true own-origin record (lo24 match) must still drop");
     }
 
     // (3) seen-set stops resurrection: once accepted then evicted from the
@@ -62,15 +137,30 @@ int main(void)
     }
 
     // (4) refresh-to-lower: a record live in the pool can never have its reach
-    //     raised by re-delivery with a higher TTL.
+    //     raised by re-delivery with a higher TTL. The verdict yields the LOWER
+    //     ttl in *out, and the caller (mesh_absorb_inbound) MUST write that back
+    //     to the live record's hop_ttl on REFRESH_LOWER — otherwise the lowering
+    //     is computed but never applied. test_mesh_diffusion models that write-back
+    //     (nd->pool_ttl = out_ttl on REFRESH_LOWER); this asserts the value.
     {
         ag_seen_t seen;
         ag_seen_init(&seen, ids, stamps, 64);
         uint8_t out;
+        // higher inbound than the live record: must NOT raise (keep the lower).
         ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, 0x88, /*inbound*/3,
             0x1, 0x2, /*in_pool*/true, /*pool_ttl*/1, &out);
         CHECK(v == AG_MESH_REFRESH_LOWER);
         CHECK_MSG(out == 1, "refresh raised TTL to %u (must keep lower=1)", out);
+
+        // lower inbound than the live record: the verdict yields the lower
+        // inbound value, which the caller applies to actually reduce reach.
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        uint8_t out2;
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x89, /*inbound*/1,
+            0x1, 0x2, /*in_pool*/true, /*pool_ttl*/3, &out2);
+        CHECK(v2 == AG_MESH_REFRESH_LOWER);
+        CHECK_MSG(out2 == 1, "refresh must yield the lower ttl=1, got %u", out2);
     }
 
     // (5) seen-set is a TIME-BOUNDED LRU: under capacity pressure an old id ages

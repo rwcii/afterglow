@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "ag_core/ag_eligible.h" // ag_adv_kind_t — observed PDU behavior
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +32,10 @@ typedef struct {
     uint64_t   ts_us;         // local capture timestamp (esp_timer)
     const uint8_t *frame;     // raw frame / adv payload
     uint16_t   frame_len;
+    // Observed PDU behavior, read from the adv-report event type (BLE) or the
+    // mgmt subtype (Wi-Fi). AG_ADV_UNKNOWN if the backend could not determine it;
+    // the eligibility gate fails closed on anything that is not broadcast-only.
+    ag_adv_kind_t adv_kind;
 } ag_capture_t;
 
 typedef void (*ag_capture_cb_t)(const ag_capture_t *cap, void *user);
@@ -43,9 +48,18 @@ typedef struct {
     ag_proto_t proto;
     const uint8_t *frame;     // BLE: raw AdvData (<=31B); Wi-Fi: beacon template
     uint16_t   frame_len;
+    // BLE only: the 6-byte advertising address to transmit and its type
+    // (0 = public, 1 = random). The backend sets the on-air AdvA from this; the
+    // emitted address type matches the observed one. Unused for Wi-Fi.
+    const uint8_t *addr;
+    uint8_t    addr_type;
     uint8_t    channel;
     int8_t     tx_power_idx;  // normalized; see radio_backend_tx_power_levels
     uint32_t   interval_ms;   // target advertising/beacon interval
+    // High-priority emissions (mesh HELLO/DATA) get guaranteed adv slots ahead
+    // of replay ghosts, so chatter can't starve them off the air. Replay leaves
+    // this 0 (default); mesh sets it true.
+    bool       priority;
 } ag_emit_t;
 
 // The backend interface. Implementations populate this vtable.

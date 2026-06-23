@@ -3,6 +3,7 @@
 #include "radio_backend.h"
 #include "pool.h"
 #include "classifier.h"
+#include "mesh.h"
 #include "esp_log.h"
 
 static const char *TAG = "capture";
@@ -14,6 +15,9 @@ static const char *TAG = "capture";
 static void on_capture(const ag_capture_t *cap, void *user)
 {
     (void)user;
+    // Mesh frames (HELLO/DATA) ride the same passive-scan stream; consume them
+    // before pool admission so they are not stored as ordinary beacons.
+    if (mesh_try_consume(cap)) return;
     if (pool_admit(cap) != ESP_OK) return;
     int idx = pool_last_admitted();
     if (idx < 0) return;

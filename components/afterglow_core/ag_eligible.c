@@ -11,6 +11,17 @@ ag_elig_policy_t ag_elig_defaults(void)
     return p;
 }
 
+ag_adv_kind_t ag_adv_kind_merge(ag_adv_kind_t a, ag_adv_kind_t b)
+{
+    // UNKNOWN is the fail-closed placeholder: any genuine observation replaces
+    // it. Between two genuine observations the more-unsafe one wins (the enum is
+    // ordered NONCONN < SCANNABLE < CONNECTABLE), so a connectable sighting can
+    // never be downgraded by a later broadcast-only one.
+    if (a == AG_ADV_UNKNOWN) return b;
+    if (b == AG_ADV_UNKNOWN) return a;
+    return (a > b) ? a : b;
+}
+
 bool ag_replay_class_cloneable(ag_elig_class_t cls)
 {
     switch (cls) {
@@ -40,9 +51,11 @@ bool ag_replay_eligible(const ag_elig_policy_t *pol,
                         ag_adv_kind_t kind,
                         bool is_wifi,
                         bool sightings_ok,
-                        bool is_own_device)
+                        bool is_own_device,
+                        bool source_present)
 {
     if (is_own_device) return false;            // exclude co-located operator gear
+    if (source_present) return false;           // only re-emit an absent source
     if (!sightings_ok) return false;            // stable-sightings gate
     if (!ag_replay_class_cloneable(cls)) return false; // reproducible-address gate
 

@@ -2,9 +2,10 @@
 //
 // Selects up to max_concurrent_ghosts REPLAY_ELIGIBLE records and emits them
 // one-at-a-time on a rotate_ms cadence (single legacy BLE advertising instance
-// effective per-ghost interval floor ~= N*rotate_ms). For BLE:
-// regenerates a static-random/NRPA address, copies raw AdvData verbatim, and
-// matches the source cadence +-interval_jitter_pct (never exactly equal).
+// effective per-ghost interval floor ~= N*rotate_ms). For BLE: emits the stored
+// advertising address (AdvA) with its observed address type and copies the raw
+// AdvData verbatim, matching the source cadence +-interval_jitter_pct (never
+// exactly equal). A record is emitted only while its source is absent.
 // For Wi-Fi (gated off by default): reconstructs the beacon, strips FCS, and
 // PER-TX overwrites the 8-byte TSF (monotonic 64-bit, H') and 2-byte
 // sequence-control (synthetic 12-bit seq, H) immediately before each

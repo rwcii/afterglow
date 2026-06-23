@@ -21,6 +21,16 @@ jobs:
         run: cmake --build build/host -j"$(nproc)"
       - name: Test
         run: ctest --test-dir build/host --output-on-failure
+      # Lock the Python separability port to detector.c. The committed vectors are
+      # C-computed; this fails if rig/separability.py drifts from the C reference.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Detector port parity (host-only, no hardware)
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest tools/onair-test/test_separability_parity.py -v
 
   # Builds the firmware for the real target with the pinned IDF.
   idf-build:
@@ -63,7 +73,15 @@ jobs:
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
-          pip install pytest-embedded pytest-embedded-idf pytest-embedded-qemu
+          # Pin to the pytest-embedded 1.x series: the 2.x line emits the modern
+          # `esptool merge-bin` (hyphenated) command form, which the esptool that
+          # ships with IDF 5.3 (v4.11.0, `merge_bin` with underscores) rejects ->
+          # the QEMU image build failed with esptool exit 2. The 1.x harness
+          # generates the merge command compatible with the bundled esptool.
+          pip install \
+            "pytest-embedded~=1.18" \
+            "pytest-embedded-idf~=1.18" \
+            "pytest-embedded-qemu~=1.18"
       - name: Build target test app
         shell: bash
         run: |
@@ -73,4 +91,7 @@ jobs:
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
+          # --build-dir is resolved relative to the test path (test/target), so the
+          # build artifacts live in test/target/build (where the build step wrote
+          # them). pytest_afterglow.py is collected via test/target/pytest.ini.
           pytest test/target --embedded-services idf,qemu --build-dir build

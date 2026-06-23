@@ -4,9 +4,9 @@
 // backend serializes capture and replay through one time-division
 // scheduler; on a dual-radio backend these run concurrently.
 //
-// Build order maps to phases: P1 capture, P2 replay, P3 pool+lifecycle
-// P4 mesh. Phases that are not yet validated ship disabled by default
-// (replay.wifi_beacons_enabled=false, mesh.enabled=false — ).
+// Build order maps to phases: P1 capture, P2 replay, P3 pool+lifecycle,
+// P4 mesh. Optional phases default off in config and are enabled per
+// deployment (replay.wifi_beacons_enabled, mesh.enabled).
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -43,6 +43,14 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(afterglow_config_load(&s_cfg));
+#ifdef AG_ONAIR_TEST
+    // On-air test hook (compiled in only for the tools/onair-test rig, never in a
+    // normal build): force-enable the mesh so the discovery rig can exercise the
+    // HELLO exchange + contact-table cooldown on real hardware. Mesh still ships
+    // disabled in production (mesh_enabled defaults false).
+    s_cfg.mesh_enabled = true;
+    ESP_LOGI(TAG, "ONAIR mesh force-enabled for the on-air discovery rig");
+#endif
     ag_entropy_init();
 
     // The Wi-Fi stack posts events to the default event loop; without it the
@@ -68,7 +76,7 @@ void app_main(void)
     ESP_ERROR_CHECK(replay_init());
     ESP_ERROR_CHECK(lifecycle_init());
 
-    // P4: mesh (disabled by default until validated).
+    // P4: mesh (optional; enabled via config).
     if (s_cfg.mesh_enabled) {
         ESP_ERROR_CHECK(mesh_init());
     }
@@ -77,7 +85,13 @@ void app_main(void)
     // radio time-shares scan and replay, so this is best-effort.
     const TickType_t replay_period = pdMS_TO_TICKS(s_cfg.rotate_ms ? s_cfg.rotate_ms : 750);
     TickType_t last_slow = xTaskGetTickCount();
+#ifdef AG_ONAIR_TEST
+    // On-air test hook: run the lifecycle/eviction sweep often so a departure is
+    // detected within seconds, keeping the on-air test fast.
+    const TickType_t slow_period = pdMS_TO_TICKS(2000);
+#else
     const TickType_t slow_period = pdMS_TO_TICKS(s_cfg.dropout_sweep_ms ? s_cfg.dropout_sweep_ms : 30000);
+#endif
     uint32_t drift_counter = 0;
     TickType_t last_stat = xTaskGetTickCount();
 
@@ -87,7 +101,44 @@ void app_main(void)
 
         // Periodic pool telemetry (~5 s): observed-beacon population size.
         if (xTaskGetTickCount() - last_stat >= pdMS_TO_TICKS(5000)) {
+#ifdef AG_ONAIR_TEST
+            // On-air test hook (compiled in only for the tools/onair-test rig):
+            // census the eligibility pipeline so the host harness can wait for a
+            // source to promote and to depart.
+            uint16_t pc = pool_count();
+            uint16_t elig = 0, dep = 0, repl = 0;
+            for (uint16_t i = 0; i < pc; i++) {
+                const ag_beacon_record_t *r = pool_record_at(i);
+                if (!r) continue;
+                if (r->flags & AG_FLAG_REPLAY_ELIGIBLE) elig++;
+                if (r->flags & AG_FLAG_DEPARTING) dep++;
+                if (classifier_replay_eligible(r)) repl++;
+            }
+            ESP_LOGI(TAG, "ONAIR census pool=%u elig=%u dep=%u replayable=%u",
+                     pc, elig, dep, repl);
+            // Report the lifecycle state of any test-stimulus record so the
+            // harness can see it captured, promoted, and departed. orig_addr holds
+            // the AdvA as the backend surfaces it: esp_bd_addr_t / MSB-first, so
+            // the stimulus body 22:33:44:55 lands in orig_addr[1..4] in that order
+            // and orig_addr[0] is the subtype octet (matching the STIM log format).
+            for (uint16_t i = 0; i < pc; i++) {
+                const ag_beacon_record_t *r = pool_record_at(i);
+                if (!r) continue;
+                if (r->orig_addr[1] == 0x22 && r->orig_addr[2] == 0x33 &&
+                    r->orig_addr[3] == 0x44 && r->orig_addr[4] == 0x55) {
+                    ESP_LOGI(TAG, "ONAIR stim addr=%02x:%02x:%02x:%02x:%02x:%02x "
+                             "cls=%u obs=%u elig=%d dep=%d repl=%d",
+                             r->orig_addr[0], r->orig_addr[1], r->orig_addr[2],
+                             r->orig_addr[3], r->orig_addr[4], r->orig_addr[5],
+                             r->cls, r->obs_count,
+                             (r->flags & AG_FLAG_REPLAY_ELIGIBLE) != 0,
+                             (r->flags & AG_FLAG_DEPARTING) != 0,
+                             classifier_replay_eligible(r));
+                }
+            }
+#else
             ESP_LOGI(TAG, "pool: %u/%u records", pool_count(), pool_capacity());
+#endif
             last_stat = xTaskGetTickCount();
         }
 

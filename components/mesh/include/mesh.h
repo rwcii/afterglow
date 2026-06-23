@@ -11,7 +11,8 @@
 #pragma once
 
 #include "esp_err.h"
-#include "pool.h"   // ag_beacon_record_t
+#include "pool.h"            // ag_beacon_record_t
+#include "radio_backend.h"   // ag_capture_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,12 @@ void mesh_tick(void);
 // dedup); absorbed into the pool only on accept. Called by the BLE transport.
 void mesh_absorb_inbound(ag_beacon_record_t *rec, uint8_t inbound_ttl,
                          uint32_t origin_node);
+
+// Inspect a captured BLE frame. If it is an Afterglow mesh frame (HELLO/DATA),
+// consume it (drive contact/transfer/reassembly) and return true so the capture
+// path skips pool admission. Returns false (and does nothing) for ordinary
+// beacons or while mesh is disabled.
+bool mesh_try_consume(const ag_capture_t *cap);
 
 #ifdef __cplusplus
 }

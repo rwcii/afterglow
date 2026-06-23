@@ -31,6 +31,11 @@ enum {
     AG_FLAG_REPLAY_ELIGIBLE = 1 << 0,
     AG_FLAG_REPLAY_LOSSY    = 1 << 1,
     AG_FLAG_DEPARTING       = 1 << 2,
+    // Provenance: this record arrived over the mesh from a foreign origin
+    // (set on absorption). Cleared on local air-capture. Carry-eligibility keys
+    // ttl0-replay-only on this flag rather than inferring own-vs-relayed from a
+    // 16-bit origin coincidence (two nodes can share a NodeID's low bits).
+    AG_FLAG_RELAYED         = 1 << 3,
 };
 
 // Pool record — mirrors `afterglow_record_t` common header.
@@ -40,16 +45,22 @@ typedef struct {
     uint8_t  flags;
     uint8_t  orig_addr[6];      // original observed AdvA/BSSID (feeds rec_id, NOT replay addr)
     uint8_t  addr_type;         // observed (informational)
-    uint16_t rec_id;            // hash(addr_type||orig_addr||payload) — stable across relays
+    uint16_t rec_id;            // stable per-record id (hash of addr_type||orig_addr||first payload); fixed across merges/relays
     uint32_t origin_node;       // full 32-bit NodeID of first air-capturer
     uint16_t interval_q;        // estimated cadence (0.625 ms / TU units)
     int8_t   rssi_last, rssi_ewma;
+    uint8_t  rssi_dev_ewma;     // EWMA of |sample - prior rssi_ewma|, dB magnitude:
+                                // this source's TEMPORAL RSSI variability,
+                                // distinct from cross-source spatial spread.
     uint8_t  channel, obs_count, hop_ttl;
     uint8_t  adv_kind;          // ag_adv_kind_t — observed PDU behavior (broadcast/scannable/connectable)
     uint16_t wifi_seq;          // per-ghost synthetic 802.11 seq state
     uint32_t first_seen_ms, last_seen_ms;
     float    base_ttl_s, ttl_cap_s;
     uint32_t replay_deadline_ms;
+    uint32_t next_rotate_ms;    // absolute ms of the next address rotation for a
+                                // ROTATING (NRPA-class) ghost; 0 = unscheduled /
+                                // STATIONARY_HOLD. Lifecycle-owned.
     float    p_virt, p_center;  // RSSI walk state
     uint8_t  payload_len;
     uint8_t  payload[31];       // BLE <=31 B; Wi-Fi beacon templates are truncated to fit (Wi-Fi replay ships off)
@@ -73,9 +84,22 @@ int pool_last_admitted(void);
 uint32_t pool_node_id(void);
 
 // Insert a fully-prepared record (e.g. a rotation successor built by lifecycle,
-// or a record absorbed over the mesh). Recomputes rec_id from the record's
-// identity+payload. Returns the slot index, or -1 if the slab is full.
-int pool_insert_record(const ag_beacon_record_t *rec);
+// or a record absorbed over the mesh). When trust_rec_id is false the id is
+// (re)computed from the record's identity+payload (a freshly built local
+// record); when true the record's rec_id is kept as-is. A meshed record carries
+// the stable rec_id the sender's seen-set deduped on, frozen at the sender's
+// FIRST sighting while the stored payload tracks the LATEST sighting — so
+// recomputing it here would mint a different id than the wire deduped on, so the
+// mesh path passes trust_rec_id=true. Returns the slot index, or -1 if full.
+// (rec_id is NOT overloaded as a sentinel: 0 is a legitimate hash output.)
+int pool_insert_record(const ag_beacon_record_t *rec, bool trust_rec_id);
+
+// Find a live record by device identity (addr_type + original observed
+// address), the same key the pool dedups local captures on. Returns the slot
+// index, or -1 if no live record matches. Used by the mesh absorb path to
+// merge-vs-insert on identity rather than on a wire rec_id that can diverge
+// from the locally-recomputed one. Valid only until the next sweep/admit.
+int pool_find_identity(uint8_t addr_type, const uint8_t orig_addr[6]);
 
 // Current number of live records.
 uint16_t pool_count(void);

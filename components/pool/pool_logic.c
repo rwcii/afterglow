@@ -1,5 +1,6 @@
 // pool_logic.c — portable pool record helpers (host-tested in test_pool.c).
 #include "pool_logic.h"
+#include "ag_core/ag_eligible.h" // ag_adv_kind_merge — stickiest-unsafe-wins
 #include <string.h>
 
 uint16_t ag_pool_rec_id(uint8_t addr_type, const uint8_t orig_addr[6],
@@ -20,14 +21,28 @@ int8_t ag_pool_rssi_ewma(int8_t prev_ewma, int8_t sample)
     return (int8_t)((int)prev_ewma + (delta >> 3));
 }
 
+uint8_t ag_pool_rssi_dev_ewma(uint8_t prev_dev, int8_t prev_ewma, int8_t sample)
+{
+    // dev += (|sample - prev_ewma| - dev) / 8. Integer math, rounds toward 0.
+    int d = (int)sample - (int)prev_ewma;
+    if (d < 0) d = -d;
+    int delta = d - (int)prev_dev;
+    return (uint8_t)((int)prev_dev + (delta >> 3));
+}
+
 int ag_pool_find(const ag_beacon_record_t *slab, uint16_t count,
                  uint8_t addr_type, const uint8_t orig_addr[6],
                  const uint8_t *payload, uint8_t payload_len)
 {
-    uint16_t rid = ag_pool_rec_id(addr_type, orig_addr, payload, payload_len);
+    // Identity is the device: addr_type + advertising address. The payload is
+    // NOT part of the match — real beacons rotate mutable bytes (counters,
+    // timestamps) every transmission, so keying identity on the payload would
+    // mint a fresh record per sighting and obs_count could never accumulate.
+    // (payload/payload_len are unused now but kept in the signature so callers
+    // and the host tests stay stable.)
+    (void)payload; (void)payload_len;
     for (uint16_t i = 0; i < count; i++) {
-        if (slab[i].rec_id == rid &&
-            slab[i].addr_type == addr_type &&
+        if (slab[i].addr_type == addr_type &&
             memcmp(slab[i].orig_addr, orig_addr, 6) == 0) {
             return (int)i;
         }
@@ -46,8 +61,17 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     if (idx >= 0) {
         ag_beacon_record_t *r = &slab[idx];
         r->rssi_last = cap->rssi;
+        // Temporal deviation first: it measures the new sample against the PRIOR
+        // mean, so it must run before rssi_ewma absorbs the sample.
+        r->rssi_dev_ewma = ag_pool_rssi_dev_ewma(r->rssi_dev_ewma, r->rssi_ewma,
+                                                 cap->rssi);
         r->rssi_ewma = ag_pool_rssi_ewma(r->rssi_ewma, cap->rssi);
         if (r->obs_count < 255) r->obs_count++;
+        // Refresh the stored payload to the latest sighting so replay emits the
+        // current AdvData. rec_id stays fixed at its first-sighting value: it is
+        // the stable per-record identifier the mesh seen-set/dedup keys on.
+        memcpy(r->payload, cap->frame, plen);
+        r->payload_len = plen;
         // Estimate cadence from the inter-arrival gap (ms → 0.625ms TU units).
         if (now_ms > r->last_seen_ms) {
             uint32_t gap = now_ms - r->last_seen_ms;
@@ -56,7 +80,24 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
         }
         r->last_seen_ms = now_ms;
         r->channel = cap->channel;
-        r->flags = (uint8_t)(r->flags & ~AG_FLAG_DEPARTING);  // it's back
+        // Stickiest-unsafe-wins: a source that EVER advertised connectably or
+        // scannably under this identity stays that kind forever, so a later
+        // broadcast-only sighting can't relax it back into eligibility.
+        r->adv_kind = (uint8_t)ag_adv_kind_merge((ag_adv_kind_t)r->adv_kind,
+                                                 cap->adv_kind);
+        // It's back — clear DEPARTING. A local re-sighting also makes this record
+        // genuinely own-origin: we air-captured it ourselves now. If it had been
+        // absorbed over the mesh (RELAYED set, origin_node = the foreign first-
+        // capturer's id), take over BOTH provenance signals together so they
+        // never disagree — clear RELAYED and reclaim origin_node as our own node.
+        // (Leaving origin_node foreign while clearing RELAYED would let carryable
+        // treat the record as own yet key its return-to-source guard off a
+        // foreign origin.)
+        if (r->flags & AG_FLAG_RELAYED) {
+            r->origin_node = node_id;
+            r->hop_ttl = 0;        // own fresh capture: ttl0 is carryable, not exhausted
+        }
+        r->flags = (uint8_t)(r->flags & ~(AG_FLAG_DEPARTING | AG_FLAG_RELAYED));
         return idx;
     }
 
@@ -66,6 +107,10 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     memset(r, 0, sizeof(*r));
     r->proto = (uint8_t)cap->proto;
     r->cls = AG_CLASS_TENTATIVE;
+    // Record the observed PDU behavior as-is. memset above zeroed it to
+    // NONCONN_NONSCAN, which would be a fail-OPEN default, so set it explicitly
+    // from the capture (AG_ADV_UNKNOWN when the backend couldn't parse it).
+    r->adv_kind = (uint8_t)cap->adv_kind;
     memcpy(r->orig_addr, orig_addr, 6);
     r->addr_type = addr_type;
     r->payload_len = plen;
@@ -73,6 +118,8 @@ int ag_pool_admit(ag_beacon_record_t *slab, uint16_t *count, uint16_t capacity,
     r->rec_id = ag_pool_rec_id(addr_type, orig_addr, cap->frame, plen);
     r->origin_node = node_id;
     r->hop_ttl = 0;            // air-captured local origin
+    // RELAYED stays clear (memset above): a local air-capture is own-origin, so
+    // this record is carryable at ttl0 (a fresh capture seeds its first hop).
     r->rssi_last = cap->rssi;
     r->rssi_ewma = cap->rssi;
     r->obs_count = 1;

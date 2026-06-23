@@ -4,7 +4,22 @@
 // so load() falls back to defaults, then clamps). Asserts defaults are sane and
 // that out-of-range overrides are pulled back into their documented bands.
 #include "afterglow_config.h"
+#include "ag_core/ag_eligible.h"
+#include "classifier_logic.h"
+#include "pool.h"
 #include "test_util.h"
+#include <string.h>
+
+// Mirror of classifier_init()'s config→policy mapping (classifier.c is not
+// host-buildable — it pulls ESP deps — so the wiring is reproduced here and
+// asserted against). Keep in lockstep with classifier_init().
+static ag_elig_policy_t policy_from_cfg(const afterglow_config_t *cfg)
+{
+    ag_elig_policy_t pol = ag_elig_defaults();
+    pol.require_broadcast_only = cfg->require_broadcast_only;
+    pol.wifi_beacons_enabled = cfg->wifi_beacons_enabled;
+    return pol;
+}
 
 int main(void)
 {
@@ -66,6 +81,72 @@ int main(void)
               p.ttl_lognorm_lo_min, p.ttl_lognorm_hi_min);
     CHECK(p.ble_min_lvl <= p.ble_max_lvl);
     CHECK(p.wifi_min_dbm <= p.wifi_max_dbm);
+
+    // (6) the conservative eligibility keys default to the safe posture and
+    //     survive a clamp unchanged (they are bools — always in range).
+    afterglow_config_t e;
+    afterglow_config_defaults(&e);
+    CHECK_MSG(e.require_broadcast_only == true, "require_broadcast_only default");
+    CHECK_MSG(e.require_beacon_payload == true, "require_beacon_payload default");
+    afterglow_config_clamp(&e);
+    CHECK(e.require_broadcast_only == true);
+    CHECK(e.require_beacon_payload == true);
+
+    // (7) the policy built from config honors a non-default eligibility posture:
+    //     with the default config the broadcast-only gate refuses a connectable
+    //     source; flipping require_broadcast_only off in config widens it. This
+    //     mirrors classifier_init()'s config→ag_elig_policy_t composition.
+    afterglow_config_t def;
+    afterglow_config_defaults(&def);
+    ag_elig_policy_t pol_def = policy_from_cfg(&def);
+    CHECK_MSG(ag_replay_eligible(&pol_def, AG_ELIG_STATIC_RANDOM,
+              AG_ADV_CONNECTABLE, /*is_wifi*/false, /*sightings_ok*/true,
+              /*own*/false, /*source_present*/false) == false,
+              "default config admitted a connectable source");
+
+    afterglow_config_t wide = def;
+    wide.require_broadcast_only = false;
+    ag_elig_policy_t pol_wide = policy_from_cfg(&wide);
+    CHECK_MSG(ag_replay_eligible(&pol_wide, AG_ELIG_STATIC_RANDOM,
+              AG_ADV_CONNECTABLE, false, true, false, /*source_present*/false) == true,
+              "non-default config did not widen the broadcast-only gate");
+
+    // (8) require_beacon_payload gates the payload-class requirement in
+    //     ag_classify_observe: a persistent static-random source WITHOUT a
+    //     recognized beacon payload stays TENTATIVE under the default (true),
+    //     but promotes (and becomes eligible) once the requirement is relaxed.
+    {
+        // AdvA with static-random subtype (top two bits of byte 0 = 0b11; AdvA is
+        // MSB-first / esp_bd_addr_t order), followed by a non-beacon AD field
+        // (0x09 = complete local name) so the beacon-payload heuristic does NOT
+        // recognize it.
+        uint8_t payload[12] = {0};
+        payload[0] = 0xC0;                 // static-random subtype bits (MSB)
+        payload[6] = 0x03; payload[7] = 0x09; payload[8] = 'a'; payload[9] = 'b';
+        ag_beacon_record_t rec = {0};
+        rec.proto = AG_PROTO_BLE;
+        rec.addr_type = 1;                 // random
+        memcpy(rec.orig_addr, payload, 6);
+        memcpy(rec.payload, payload, sizeof payload);
+        rec.payload_len = 10;
+        rec.adv_kind = AG_ADV_NONCONN_NONSCAN;
+        rec.obs_count = 5;                 // well past min_sightings
+
+        ag_beacon_record_t strict = rec;
+        ag_classify_observe(&strict, 3, /*require_beacon_payload=*/true);
+        CHECK_MSG(strict.cls == AG_CLASS_TENTATIVE,
+                  "non-beacon source promoted under strict payload policy (cls=%u)",
+                  strict.cls);
+        CHECK_MSG((strict.flags & AG_FLAG_REPLAY_ELIGIBLE) == 0,
+                  "non-beacon source eligible under strict payload policy");
+
+        ag_beacon_record_t relaxed = rec;
+        ag_classify_observe(&relaxed, 3, /*require_beacon_payload=*/false);
+        CHECK_MSG(relaxed.cls == AG_CLASS_STATIC_RANDOM_BLE,
+                  "relaxed payload policy did not promote (cls=%u)", relaxed.cls);
+        CHECK_MSG((relaxed.flags & AG_FLAG_REPLAY_ELIGIBLE) != 0,
+                  "relaxed payload policy did not mark eligible");
+    }
 
     TEST_SUMMARY();
 }

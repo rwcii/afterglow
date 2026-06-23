@@ -76,30 +76,37 @@ int main(void)
     float p_before = t.p_virt;
 
     // present: no change.
-    CHECK(ag_life_tick_record(&t, 10000 + 1000, GAP_MULT, &rng) == AG_LIFE_NONE);
+    CHECK(ag_life_tick_record(&t, 10000 + 1000, GAP_MULT) == AG_LIFE_NONE);
     CHECK(!(t.flags & AG_FLAG_DEPARTING));
     CHECK(t.p_virt == p_before);
 
     // crossed the gap: flagged + faded toward center.
-    ag_life_action_t a = ag_life_tick_record(&t, 10000 + 6000, GAP_MULT, &rng);
+    ag_life_action_t a = ag_life_tick_record(&t, 10000 + 6000, GAP_MULT);
     CHECK_MSG(a == AG_LIFE_DEPARTING, "expected DEPARTING, got %d", (int)a);
     CHECK(t.flags & AG_FLAG_DEPARTING);
     CHECK_MSG(t.p_virt < p_before, "p_virt did not fade: %g", (double)t.p_virt);
 
-    // still inside the post-departure grace window (gap+1s < gap+2min): NONE.
-    CHECK(ag_life_tick_record(&t, 10000 + 5000 + 1000, GAP_MULT, &rng)
-          == AG_LIFE_NONE);
+    // already departing: presence gate only — the record is HELD (NONE), never
+    // retired here. Lineage lifetime is the eviction TTL's job, not departure's.
+    CHECK(ag_life_tick_record(&t, 10000 + 6000 + 1000, GAP_MULT) == AG_LIFE_NONE);
+    CHECK(t.flags & AG_FLAG_DEPARTING);   // flag persists
+    float p_departing = t.p_virt;
 
-    // well past gap + max grace (12 min = 720000 ms): EXPIRE.
-    uint32_t far = 10000 + 5000 + 720000u + 1000;
-    CHECK_MSG(ag_life_tick_record(&t, far, GAP_MULT, &rng) == AG_LIFE_EXPIRE,
-              "expected EXPIRE past grace window");
+    // even arbitrarily far past the gap: still NONE (no grace/expire path).
+    uint32_t far = 10000 + 6000 + 3600000u;  // +1 hour
+    CHECK_MSG(ag_life_tick_record(&t, far, GAP_MULT) == AG_LIFE_NONE,
+              "departure must not retire a record (TTL owns lifetime)");
+    CHECK(t.p_virt == p_departing);       // fade applied once, not repeatedly
 
     // --- rotation successor ----------------------------------------------
     ag_beacon_record_t parent = mk_rec();
     parent.rssi_ewma = -52;
     parent.p_virt = -3.5f;
     parent.p_center = -2.0f;
+    parent.first_seen_ms = 30000u;   // original device first seen at t=30s
+    parent.base_ttl_s = 600.0f;      // lineage TTL basis
+    parent.ttl_cap_s = 900.0f;
+    parent.replay_deadline_ms = 123456u;
     ag_beacon_record_t child;
     ag_life_make_successor(&parent, &child, 0x12345678u, 99000u);
 
@@ -115,15 +122,105 @@ int main(void)
     // address differs (new identity), presence reset, not departing, id cleared.
     CHECK_MSG(memcmp(child.orig_addr, parent.orig_addr, 6) != 0,
               "successor reused the parent address");
-    CHECK(child.first_seen_ms == 99000u && child.last_seen_ms == 99000u);
     CHECK(child.obs_count == 1);
     CHECK(!(child.flags & AG_FLAG_DEPARTING));
     CHECK(child.rec_id == 0);
 
-    // distinct seeds yield distinct addresses (deterministic from seed).
+    // last_seen tracks the new sighting; first_seen does NOT — the lineage ages
+    // from the original device's first sighting so the TTL deadline is shared.
+    CHECK(child.last_seen_ms == 99000u);
+    CHECK_MSG(child.first_seen_ms == parent.first_seen_ms,
+              "successor reset the lineage age clock (first_seen_ms=%u, want %u)",
+              child.first_seen_ms, parent.first_seen_ms);
+    CHECK_MSG(child.base_ttl_s == parent.base_ttl_s &&
+              child.ttl_cap_s == parent.ttl_cap_s &&
+              child.replay_deadline_ms == parent.replay_deadline_ms,
+              "successor did not inherit the lineage TTL basis");
+
+    // successor address is a Non-Resolvable Private Address: subtype bits (top two
+    // of the MSB) are 0b00 — never 0b01 (RPA) or 0b10 (reserved).
+    CHECK_MSG((child.orig_addr[0] & 0xC0) == 0x00,
+              "successor address is not NRPA-class (msb=0x%02x)", child.orig_addr[0]);
+
+    // distinct seeds yield distinct, still-NRPA addresses (deterministic).
     ag_beacon_record_t c2;
     ag_life_make_successor(&parent, &c2, 0x12345679u, 99000u);
     CHECK(memcmp(c2.orig_addr, child.orig_addr, 6) != 0);
+    CHECK((c2.orig_addr[0] & 0xC0) == 0x00);
+
+    // every seed yields an NRPA: sweep a range of seeds and check the subtype bits.
+    for (uint32_t s = 1; s <= 256; s++) {
+        ag_beacon_record_t cs;
+        ag_life_make_successor(&parent, &cs, s * 2654435761u, 99000u);
+        CHECK_MSG((cs.orig_addr[0] & 0xC0) == 0x00,
+                  "seed %u produced a non-NRPA successor (msb=0x%02x)",
+                  s, cs.orig_addr[0]);
+    }
+
+    // --- rotation mode ---------------------------------------------------
+    // Only the NRPA class rotates; everything cloneable else holds.
+    CHECK(ag_life_rotation_mode(AG_CLASS_NRPA_BLE) == AG_LIFE_ROTATING);
+    CHECK(ag_life_rotation_mode(AG_CLASS_STATIC_RANDOM_BLE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_PUBLIC_BLE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_WIFI) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_TENTATIVE) == AG_LIFE_STATIONARY_HOLD);
+    CHECK(ag_life_rotation_mode(AG_CLASS_RPA_BLE) == AG_LIFE_STATIONARY_HOLD);
+
+    // --- rotation period draw: log-normal clamped to [1 min, 1 h] ---------
+    {
+        uint32_t lo = 1u * 60u * 1000u, hi = 60u * 60u * 1000u;
+        uint64_t sum = 0; int N = 4000;
+        for (int k = 0; k < N; k++) {
+            uint32_t ms = ag_life_draw_rotate_ms(&rng);
+            CHECK_MSG(ms >= lo && ms <= hi,
+                      "rotate period %u out of [%u,%u]", ms, lo, hi);
+            sum += ms;
+        }
+        uint32_t mean = (uint32_t)(sum / (uint64_t)N);
+        // log-normal located at 15 min — mean sits modestly above the median;
+        // just assert it lands in a sane minutes-scale band (not pinned to a clamp).
+        CHECK_MSG(mean > 10u * 60u * 1000u && mean < 30u * 60u * 1000u,
+                  "rotate-period mean %u ms outside the expected band", mean);
+    }
+
+    // --- rotation-due predicate ------------------------------------------
+    {
+        ag_beacon_record_t due = mk_rec();
+        due.next_rotate_ms = 0;               // unscheduled -> never due
+        CHECK(!ag_life_rotation_due(&due, 1000000u));
+        due.next_rotate_ms = 50000u;
+        CHECK(!ag_life_rotation_due(&due, 49999u));
+        CHECK(ag_life_rotation_due(&due, 50000u));
+        CHECK(ag_life_rotation_due(&due, 60000u));
+    }
+
+    // --- rotate-in-place sequence: lineage ages, address churns to NRPA,
+    //     never triggered by departure -------------------------------------
+    {
+        ag_beacon_record_t g = mk_rec();
+        g.cls = AG_CLASS_NRPA_BLE;
+        g.orig_addr[0] = 0x00;               // NRPA parent
+        g.first_seen_ms = 10000u;
+        g.base_ttl_s = 600.0f;
+        g.last_seen_ms = 200000u;            // present (not departed)
+        uint32_t parent_first = g.first_seen_ms;
+        float parent_ttl = g.base_ttl_s;
+        uint8_t prev_addr[6];
+        memcpy(prev_addr, g.orig_addr, 6);
+
+        // simulate three rotations
+        for (int k = 0; k < 3; k++) {
+            ag_beacon_record_t s;
+            ag_life_make_successor(&g, &s, ag_prng_u32(&rng), 200000u + k * 1000u);
+            s.next_rotate_ms = (200000u + k * 1000u) + ag_life_draw_rotate_ms(&rng);
+            g = s;
+            CHECK_MSG((g.orig_addr[0] & 0xC0) == 0x00, "rotated addr not NRPA");
+            CHECK_MSG(memcmp(g.orig_addr, prev_addr, 6) != 0, "rotation reused address");
+            CHECK_MSG(g.first_seen_ms == parent_first, "rotation reset lineage age");
+            CHECK_MSG(g.base_ttl_s == parent_ttl, "rotation changed lineage TTL");
+            memcpy(prev_addr, g.orig_addr, 6);
+        }
+    }
 
     TEST_SUMMARY();
 }

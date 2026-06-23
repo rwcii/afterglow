@@ -1,10 +1,12 @@
-// lifecycle.c — rotation-vs-departure successor model (hardware wrapper).
+// lifecycle.c — per-record presence tracking (hardware wrapper).
 // Per-record decisions are the portable, host-tested lifecycle_logic; this
-// wrapper walks the pool, supplies the clock/RNG/config, and applies the
-// own-device exclusion + successor insertion.
+// wrapper walks the pool, supplies the clock/RNG/config, applies the own-device
+// exclusion, and advances each record's presence (departed) state. Record
+// lifetime is owned by the pool eviction sweep's per-record TTL.
 #include "lifecycle.h"
 #include "lifecycle_logic.h"
 #include "pool.h"
+#include "pool_logic.h"         // ag_pool_rec_id (successor id recompute)
 #include "afterglow_config.h"
 #include "entropy.h"
 #include "ag_core/ag_prng.h"
@@ -42,22 +44,45 @@ void lifecycle_tick(void)
             continue;
         }
 
-        ag_life_action_t act =
-            ag_life_tick_record(r, t, s_cfg.depart_gap_mult, &s_rng);
+        // Advance the per-record presence state: ag_life_tick_record sets
+        // AG_FLAG_DEPARTING once the source has been silent past its
+        // cadence-scaled gap (and the flag is cleared in pool admission the
+        // moment the source is observed again). The departed flag gates emission
+        // — a record is re-emitted only while its source is absent. Record
+        // lifetime is governed solely by the eviction sweep's per-record TTL
+        // (age from first_seen), so departure no longer clears eligibility or
+        // retires the record here.
+        ag_life_tick_record(r, t, s_cfg.depart_gap_mult);
 
-        if (act == AG_LIFE_EXPIRE) {
-            // Rotation model: for sources that behaved phone-like (a rotating
-            // class), pair the retirement with a fresh successor carrying a
-            // continuous RSSI trajectory. Static beacons just fade (the eviction
-            // sweep collects them).
-            if (r->cls == AG_CLASS_RPA_BLE || r->cls == AG_CLASS_NRPA_BLE) {
-                ag_beacon_record_t child;
-                ag_life_make_successor(r, &child, ag_rand_u32(), t);
-                pool_insert_record(&child);   // recomputes rec_id
+        // Address rotation — independent of presence and TTL. A ROTATING
+        // (NRPA-class) ghost swaps to a fresh NRPA address on its per-ghost timer
+        // and keeps doing so until the lineage's TTL completes (the successor
+        // inherits first_seen/base_ttl, so eviction still kills the lineage). The
+        // rotation is decoupled from the departure/grace event entirely.
+        if (s_cfg.rotation_enabled &&
+            ag_life_rotation_mode(r->cls) == AG_LIFE_ROTATING) {
+            if (r->next_rotate_ms == 0u) {
+                // Arm the first rotation when the ghost becomes rotation-managed.
+                r->next_rotate_ms = t + ag_life_draw_rotate_ms(&s_rng);
+            } else if (ag_life_rotation_due(r, t)) {
+                ag_beacon_record_t succ;
+                ag_life_make_successor(r, &succ, ag_rand_u32(), t);
+                succ.rec_id = ag_pool_rec_id(succ.addr_type, succ.orig_addr,
+                                             succ.payload, succ.payload_len);
+                succ.next_rotate_ms = t + ag_life_draw_rotate_ms(&s_rng);
+#ifdef AG_ONAIR_TEST
+                // Rig hook: announce the address swap so the harness can confirm a
+                // ROTATING ghost churns on-air and the lineage keeps its TTL.
+                ESP_LOGI(TAG, "ONAIR rotate old=%02x:%02x:%02x:%02x:%02x:%02x "
+                         "new=%02x:%02x:%02x:%02x:%02x:%02x first_seen=%u next=%u",
+                         r->orig_addr[0], r->orig_addr[1], r->orig_addr[2],
+                         r->orig_addr[3], r->orig_addr[4], r->orig_addr[5],
+                         succ.orig_addr[0], succ.orig_addr[1], succ.orig_addr[2],
+                         succ.orig_addr[3], succ.orig_addr[4], succ.orig_addr[5],
+                         (unsigned)succ.first_seen_ms, (unsigned)succ.next_rotate_ms);
+#endif
+                *r = succ;  // rotate in place; keeps the round-robin slot/eligibility
             }
-            // Mark non-eligible; TTL/dropout in the eviction sweep frees the slot.
-            r->flags &= (uint8_t)~AG_FLAG_REPLAY_ELIGIBLE;
-            r->flags |= AG_FLAG_DEPARTING;
         }
     }
 }

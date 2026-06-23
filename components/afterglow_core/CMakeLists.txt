@@ -10,6 +10,7 @@ idf_component_register(
         "ag_subset.c"
         "ag_meshguard.c"
         "ag_eligible.c"
+        "ag_txad.c"
     INCLUDE_DIRS "include"
 )
 

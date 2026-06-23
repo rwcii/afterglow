@@ -24,10 +24,17 @@ extern "C" {
 
 // Tick outcome for one record.
 typedef enum {
-    AG_LIFE_NONE = 0,   // present (or already-departing within grace): no change
+    AG_LIFE_NONE = 0,   // present, or already-departing: no change this tick
     AG_LIFE_DEPARTING,  // crossed the departure gap this tick: flagged + faded
-    AG_LIFE_EXPIRE,     // past the post-departure grace window: retire the record
 } ag_life_action_t;
+
+// Per-ghost address-rotation behavior. STATIONARY_HOLD ghosts keep one
+// cloned address for life; ROTATING ghosts swap to a fresh NRPA on a per-ghost
+// independent ~15 min timer and keep doing so until the lineage's TTL completes.
+typedef enum {
+    AG_LIFE_STATIONARY_HOLD = 0, // static-random / public / Wi-Fi: never rotate
+    AG_LIFE_ROTATING,            // NRPA class: rotate to fresh NRPA on the timer
+} ag_life_rotation_mode_t;
 
 // Estimated advertising cadence in ms from interval_q (0.625 ms TU units:
 // ms = q * 5 / 8). Returns 0 when interval_q is 0 (cadence not yet estimated).
@@ -46,15 +53,16 @@ bool ag_life_is_own_device(const ag_beacon_record_t *r, uint32_t now_ms,
 bool ag_life_departed(const ag_beacon_record_t *r, uint32_t now_ms,
                       uint8_t depart_gap_mult);
 
-// Advance one record's lifecycle by one tick.
+// Advance one record's PRESENCE state by one tick (presence gate only — not
+// end-of-life; lineage lifetime is owned solely by the eviction TTL):
 //  - present (not departed): no change, returns AG_LIFE_NONE.
 //  - departed, not yet flagged: set AG_FLAG_DEPARTING and fade p_virt down
 //    (bias toward p_center), returns AG_LIFE_DEPARTING.
-//  - departed and flagged: returns AG_LIFE_EXPIRE once the silence exceeds the
-//    departure gap PLUS a post-departure grace window drawn in [2,12] minutes
-//    (rng); otherwise AG_LIFE_NONE while still inside the grace window.
+//  - departed and already flagged: no change, returns AG_LIFE_NONE (the record
+//    is held — replayable while absent — until the eviction sweep retires it at
+//    its TTL). Re-observation clears AG_FLAG_DEPARTING in pool admission.
 ag_life_action_t ag_life_tick_record(ag_beacon_record_t *r, uint32_t now_ms,
-                                     uint8_t depart_gap_mult, ag_prng_t *rng);
+                                     uint8_t depart_gap_mult);
 
 // Build a rotation successor from parent into child (rotation model). Copies the
 // payload and identity context, assigns a fresh pseudo-random orig_addr derived
@@ -65,6 +73,18 @@ ag_life_action_t ag_life_tick_record(ag_beacon_record_t *r, uint32_t now_ms,
 void ag_life_make_successor(const ag_beacon_record_t *parent,
                             ag_beacon_record_t *child, uint32_t new_addr_seed,
                             uint32_t now_ms);
+
+// Rotation mode for a record's beacon class: AG_LIFE_ROTATING for the
+// NRPA class, AG_LIFE_STATIONARY_HOLD for everything else.
+ag_life_rotation_mode_t ag_life_rotation_mode(uint8_t cls);
+
+// Draw a per-ghost address-rotation period (ms): log-normal located at ~15 min,
+// clamped to [1 min, 1 h]. Independent per call (no cohort correlation).
+uint32_t ag_life_draw_rotate_ms(ag_prng_t *rng);
+
+// True when a ROTATING ghost's scheduled rotation deadline (next_rotate_ms) has
+// passed. next_rotate_ms == 0 (unscheduled / stationary) is never due.
+bool ag_life_rotation_due(const ag_beacon_record_t *r, uint32_t now_ms);
 
 #ifdef __cplusplus
 }
