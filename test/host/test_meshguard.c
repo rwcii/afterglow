@@ -137,15 +137,30 @@ int main(void)
     }
 
     // (4) refresh-to-lower: a record live in the pool can never have its reach
-    //     raised by re-delivery with a higher TTL.
+    //     raised by re-delivery with a higher TTL. The verdict yields the LOWER
+    //     ttl in *out, and the caller (mesh_absorb_inbound) MUST write that back
+    //     to the live record's hop_ttl on REFRESH_LOWER — otherwise the lowering
+    //     is computed but never applied. test_mesh_diffusion models that write-back
+    //     (nd->pool_ttl = out_ttl on REFRESH_LOWER); this asserts the value.
     {
         ag_seen_t seen;
         ag_seen_init(&seen, ids, stamps, 64);
         uint8_t out;
+        // higher inbound than the live record: must NOT raise (keep the lower).
         ag_mesh_verdict_t v = ag_mesh_evaluate(&seen, 0x88, /*inbound*/3,
             0x1, 0x2, /*in_pool*/true, /*pool_ttl*/1, &out);
         CHECK(v == AG_MESH_REFRESH_LOWER);
         CHECK_MSG(out == 1, "refresh raised TTL to %u (must keep lower=1)", out);
+
+        // lower inbound than the live record: the verdict yields the lower
+        // inbound value, which the caller applies to actually reduce reach.
+        ag_seen_t seen2;
+        ag_seen_init(&seen2, ids, stamps, 64);
+        uint8_t out2;
+        ag_mesh_verdict_t v2 = ag_mesh_evaluate(&seen2, 0x89, /*inbound*/1,
+            0x1, 0x2, /*in_pool*/true, /*pool_ttl*/3, &out2);
+        CHECK(v2 == AG_MESH_REFRESH_LOWER);
+        CHECK_MSG(out2 == 1, "refresh must yield the lower ttl=1, got %u", out2);
     }
 
     // (5) seen-set is a TIME-BOUNDED LRU: under capacity pressure an old id ages
